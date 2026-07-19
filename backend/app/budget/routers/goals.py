@@ -3,7 +3,7 @@ from sqlmodel import Session
 
 from app.budget.db import get_session
 from app.budget import goal_customization
-from app.budget.schemas import GoalCheckinUpdate, GoalCreate, GoalGroupEnd, GoalGroupUpdate, GoalProgressUpdate, GoalRaise, GoalRead, GoalTaskRead, GoalUpdate
+from app.budget.schemas import GoalCheckinUpdate, GoalCreate, GoalGroupEnd, GoalGroupSettingsRead, GoalGroupSettingsUpdate, GoalGroupUpdate, GoalProgressUpdate, GoalRaise, GoalRead, GoalTaskRead, GoalUpdate
 from app.budget.services import goals as goals_svc
 
 router = APIRouter(prefix="/api", tags=["goals"])
@@ -54,6 +54,23 @@ def rename_goal_group(body: GoalGroupUpdate, session: Session = Depends(get_sess
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return [goals_svc.goal_to_read(session, goal) for goal in goals]
+
+
+@router.get("/goal-groups/{name}/customization", response_model=GoalGroupSettingsRead)
+def get_group_customization(name: str, session: Session = Depends(get_session)):
+    settings = goals_svc.get_group_settings(session, name)
+    return GoalGroupSettingsRead(name=name, icon=settings.icon if settings else None,
+                                 color=settings.color if settings else None)
+
+
+@router.put("/goal-groups/{name}/customization", response_model=GoalGroupSettingsRead)
+def set_group_customization(name: str, body: GoalGroupSettingsUpdate, session: Session = Depends(get_session)):
+    try:
+        settings = goals_svc.set_group_settings(session, name, body.icon, body.color)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return GoalGroupSettingsRead(name=name, icon=settings.icon if settings else None,
+                                 color=settings.color if settings else None)
 
 
 @router.post("/goal-groups/end", response_model=list[int])

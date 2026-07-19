@@ -143,6 +143,17 @@ class GoalGroupEnd(BaseModel):
     goal_ids: list[int]
 
 
+class GoalGroupSettingsUpdate(BaseModel):
+    icon: Optional[str] = None
+    color: Optional[str] = None
+
+
+class GoalGroupSettingsRead(BaseModel):
+    name: str
+    icon: Optional[str] = None
+    color: Optional[str] = None
+
+
 class GoalProgressUpdate(BaseModel):
     current: Optional[float] = None  # set the manual value
     add: Optional[float] = None      # or add to it (a contribution)

@@ -23,3 +23,31 @@ def test_catalog_shape(client):
     assert {"tag", "flame", "chart"} <= tokens
     assert {"pine", "honey", "copper"} <= colors
     assert all("light" in c and "dark" in c for c in body["colors"])
+
+
+def test_group_customization_upsert_and_clear(client, session):
+    # unknown token rejected
+    bad = client.put("/api/goal-groups/Trips/customization", json={"icon": "bogus"})
+    assert bad.status_code == 400
+
+    # set icon + color
+    r = client.put("/api/goal-groups/Trips/customization", json={"icon": "plane", "color": "sky"})
+    assert r.status_code == 200 and r.json() == {"name": "Trips", "icon": "plane", "color": "sky"}
+
+    # read back
+    got = client.get("/api/goal-groups/Trips/customization").json()
+    assert got == {"name": "Trips", "icon": "plane", "color": "sky"}
+
+    # partial update keeps the other field
+    r = client.put("/api/goal-groups/Trips/customization", json={"icon": "car", "color": "sky"})
+    assert r.json()["icon"] == "car"
+
+    # clearing both deletes the row -> defaults (nulls)
+    r = client.put("/api/goal-groups/Trips/customization", json={"icon": None, "color": None})
+    assert r.json() == {"name": "Trips", "icon": None, "color": None}
+    assert client.get("/api/goal-groups/Trips/customization").json() == {"name": "Trips", "icon": None, "color": None}
+
+
+def test_group_customization_defaults_when_unset(client):
+    got = client.get("/api/goal-groups/Nope/customization").json()
+    assert got == {"name": "Nope", "icon": None, "color": None}

@@ -2,7 +2,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.budget.categories import SPENDING_CATEGORIES
 from app.config import get_settings
-from app.budget.models import Budget, Category
+from app.budget.models import Budget, Category, GoalGroupSettings
 
 settings = get_settings()
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
@@ -26,6 +26,7 @@ def ensure_schema(eng=engine) -> None:
     SQLModel.metadata.create_all() creates missing tables but never alters existing
     ones, so an older money.db needs the new columns added by hand. Idempotent."""
     Budget.__table__.create(eng, checkfirst=True)
+    GoalGroupSettings.__table__.create(eng, checkfirst=True)
     with eng.begin() as conn:
         # `Budget` moved to a period-aware table so one category can have daily,
         # weekly, and monthly guardrails. Copy the legacy monthly rows exactly once;

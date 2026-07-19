@@ -7,8 +7,9 @@ from sqlmodel import Session, select
 
 from collections import defaultdict
 
+from app.budget import goal_customization
 from app.budget.goal_types import GOAL_TYPES, GoalContext, goal_period_start, goal_progress, period_window
-from app.budget.models import Account, Goal, GoalAccountLink, GoalCheckin, GoalHistory, GoalMilestone
+from app.budget.models import Account, Goal, GoalAccountLink, GoalCheckin, GoalGroupSettings, GoalHistory, GoalMilestone
 from app.budget.services.summary import cash_flow_in_range, spend_by_category_in_range
 
 _VALID_KINDS = set(GOAL_TYPES)
@@ -585,6 +586,30 @@ def set_goal_group(session: Session, goal_ids: list[int], name: str) -> list[Goa
     for goal in goals:
         session.refresh(goal)
     return goals
+
+
+def _group_settings_map(session: Session) -> dict[str, "GoalGroupSettings"]:
+    return {s.name: s for s in session.exec(select(GoalGroupSettings)).all()}
+
+
+def get_group_settings(session: Session, name: str) -> GoalGroupSettings | None:
+    return session.get(GoalGroupSettings, name)
+
+
+def set_group_settings(session: Session, name: str, icon: str | None, color: str | None) -> GoalGroupSettings | None:
+    goal_customization.validate_icon(icon)
+    goal_customization.validate_color(color)
+    settings = session.get(GoalGroupSettings, name)
+    if icon is None and color is None:
+        if settings is not None:
+            session.delete(settings); session.commit()
+        return None
+    if settings is None:
+        settings = GoalGroupSettings(name=name)
+    settings.icon = icon
+    settings.color = color
+    session.add(settings); session.commit(); session.refresh(settings)
+    return settings
 
 
 def archive_goal_group(session: Session, goal_ids: list[int]) -> list[int]:

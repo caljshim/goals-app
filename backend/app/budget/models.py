@@ -120,6 +120,15 @@ class Goal(SQLModel, table=True):
     archived_at: Optional[datetime] = Field(default=None, index=True)
 
 
+class GoalGroupSettings(SQLModel, table=True):
+    """Per-group appearance (icon/color tokens), keyed by the group name shared
+    across a set of goals. Created lazily only when a group is customized;
+    absence means defaults."""
+    name: str = Field(primary_key=True)
+    icon: Optional[str] = None
+    color: Optional[str] = None
+
+
 class GoalHistory(SQLModel, table=True):
     """One recorded goal value at a point in time — manual progress entries plus
     daily snapshots for bank-derived financial goals."""
