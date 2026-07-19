@@ -140,6 +140,7 @@ struct ReimbursementUpdateBody: Encodable { let targetId: Int? }
 struct NewBudget: Encodable { let category: String; let monthlyLimit: Double; let period: String }
 struct GoalProgressBody: Encodable { let current: Double?; let add: Double? }
 struct GoalTargetBody: Encodable { let target: Double }
+struct GoalNameBody: Encodable { let name: String }
 struct NewGoalBody: Encodable {
     let name, kind, period, direction: String
     let target, current: Double?
@@ -185,6 +186,7 @@ struct ChatBody: Encodable { let messages: [ChatMessage] }
     @Published var budgets: [Budget] = []; @Published var summary: Summary?
     @Published var goals: [Goal] = []
     @Published var archivedGoals: [Goal] = []
+    @Published var focusedWidgetId: String?
     @Published var goalCelebration: Goal?
     @Published var portfolio: Portfolio?
     @Published var messages: [ChatMessage] = ChatStorage.load() { didSet { ChatStorage.save(messages) } }
@@ -419,6 +421,19 @@ struct ChatBody: Encodable { let messages: [ChatMessage] }
             replaceGoal(updated)
         } catch { show(error) }
     }
+    func setGoalName(_ goal: Goal, name: String) async {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, clean.count <= 80 else { return }
+        do {
+            let updated: Goal = try await api.request(
+                "goals/\(goal.id)", method: "PATCH", body: .init(GoalNameBody(name: clean)))
+            replaceGoal(updated)
+        } catch { show(error) }
+    }
+
+    func focus(_ id: String) { focusedWidgetId = id }
+    func clearFocus() { focusedWidgetId = nil }
+    func isFocused(_ id: String) -> Bool { focusedWidgetId == id }
 
     func setGroupAppearance(_ name: String, icon: String?, color: String?) async {
         do {
