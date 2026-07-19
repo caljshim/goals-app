@@ -633,10 +633,13 @@ def _group_settings_map(session: Session) -> dict[str, "GoalGroupSettings"]:
 
 
 def get_group_settings(session: Session, name: str) -> GoalGroupSettings | None:
-    return session.get(GoalGroupSettings, name)
+    return session.get(GoalGroupSettings, name.strip())
 
 
 def set_group_settings(session: Session, name: str, icon: str | None, color: str | None) -> GoalGroupSettings | None:
+    # Key settings by the same normalized name that set_goal_group stores on
+    # Goal.group, so the read-model cascade (keyed by g.group) always matches.
+    name = name.strip()
     goal_customization.validate_icon(icon)
     goal_customization.validate_color(color)
     settings = session.get(GoalGroupSettings, name)

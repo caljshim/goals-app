@@ -51,3 +51,17 @@ def test_group_customization_upsert_and_clear(client, session):
 def test_group_customization_defaults_when_unset(client):
     got = client.get("/api/goal-groups/Nope/customization").json()
     assert got == {"name": "Nope", "icon": None, "color": None}
+
+
+def test_group_customization_name_is_normalized(client):
+    # A whitespace-variant group name must key the same settings as the
+    # normalized Goal.group, so the read-model cascade still matches.
+    gid = client.post("/api/goals", json={
+        "name": "A", "kind": "numeric", "target": 10, "current": 1, "group": "Trips"}).json()["id"]
+    r = client.put("/api/goal-groups/%20%20Trips%20%20/customization", json={"color": "sky"})
+    assert r.json() == {"name": "Trips", "icon": None, "color": "sky"}
+    # keyed under the stripped name (readable via the clean name)
+    assert client.get("/api/goal-groups/Trips/customization").json()["color"] == "sky"
+    # and it cascades to the member goal
+    goal = next(g for g in client.get("/api/goals").json() if g["id"] == gid)
+    assert goal["group_color"] == "sky" and goal["resolved_color"] == "sky"

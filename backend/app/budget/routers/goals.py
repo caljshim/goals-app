@@ -58,6 +58,7 @@ def rename_goal_group(body: GoalGroupUpdate, session: Session = Depends(get_sess
 
 @router.get("/goal-groups/{name}/customization", response_model=GoalGroupSettingsRead)
 def get_group_customization(name: str, session: Session = Depends(get_session)):
+    name = name.strip()
     settings = goals_svc.get_group_settings(session, name)
     return GoalGroupSettingsRead(name=name, icon=settings.icon if settings else None,
                                  color=settings.color if settings else None)
@@ -65,6 +66,7 @@ def get_group_customization(name: str, session: Session = Depends(get_session)):
 
 @router.put("/goal-groups/{name}/customization", response_model=GoalGroupSettingsRead)
 def set_group_customization(name: str, body: GoalGroupSettingsUpdate, session: Session = Depends(get_session)):
+    name = name.strip()
     try:
         settings = goals_svc.set_group_settings(session, name, body.icon, body.color)
     except ValueError as exc:
