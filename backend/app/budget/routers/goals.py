@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlmodel import Session
 
 from app.budget.db import get_session
+from app.budget import goal_customization
 from app.budget.schemas import GoalCheckinUpdate, GoalCreate, GoalGroupEnd, GoalGroupUpdate, GoalProgressUpdate, GoalRaise, GoalRead, GoalTaskRead, GoalUpdate
 from app.budget.services import goals as goals_svc
 
@@ -11,6 +12,11 @@ router = APIRouter(prefix="/api", tags=["goals"])
 @router.get("/goals", response_model=list[GoalRead])
 def list_goals(archived: bool = False, session: Session = Depends(get_session)):
     return goals_svc.list_with_progress(session, archived=archived)
+
+
+@router.get("/goal-customization/catalog")
+def goal_customization_catalog():
+    return goal_customization.catalog()
 
 
 @router.get("/goal-tasks", response_model=list[GoalTaskRead])
