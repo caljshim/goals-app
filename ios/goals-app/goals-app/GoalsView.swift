@@ -1271,6 +1271,79 @@ struct WeeklyScheduleEditor: View {
     }
 }
 
+/// Reusable appearance editor for a goal or a group. `nil` icon/color means
+/// "use the default / inherit"; the grids include an explicit Default swatch.
+struct IconColorPicker: View {
+    let title: String
+    let defaultIcon: String
+    @State var icon: String?
+    @State var color: String?
+    let onSave: (_ icon: String?, _ color: String?) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 6)
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("Color").font(.subheadline.weight(.semibold))
+                    LazyVGrid(columns: columns, spacing: 12) {
+                        swatch(nil)
+                        ForEach(Customization.colorCatalog, id: \.self) { swatch($0) }
+                    }
+                    Text("Icon").font(.subheadline.weight(.semibold))
+                    LazyVGrid(columns: columns, spacing: 12) {
+                        iconCell(nil)
+                        ForEach(Customization.iconCatalog, id: \.self) { iconCell($0) }
+                    }
+                }
+                .padding()
+            }
+            .background(Theme.canvas)
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { onSave(icon, color); dismiss() }
+                }
+            }
+        }
+    }
+
+    private var accent: Color { color.map(Customization.color(for:)) ?? Theme.brand }
+
+    @ViewBuilder private func swatch(_ token: String?) -> some View {
+        let selected = token == color
+        Button { color = token } label: {
+            Circle()
+                .fill(token.map(Customization.color(for:)) ?? Color.secondary.opacity(0.25))
+                .frame(width: 34, height: 34)
+                .overlay { if token == nil { Image(systemName: "slash.circle").font(.caption) } }
+                .overlay(Circle().strokeBorder(Theme.brand, lineWidth: selected ? 3 : 0))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(token ?? "Default color")
+    }
+
+    @ViewBuilder private func iconCell(_ token: String?) -> some View {
+        let selected = token == icon
+        Button { icon = token } label: {
+            Image(systemName: token.map(Customization.symbol(for:)) ?? Customization.symbol(for: defaultIcon))
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(token == nil ? Color.secondary : accent)
+                .frame(width: 40, height: 40)
+                .background((token == nil ? Color.secondary : accent).opacity(0.13),
+                            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Theme.brand, lineWidth: selected ? 2 : 0))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(token ?? "Default icon")
+    }
+}
+
 enum GoalComposerMode: Equatable { case goal, routine }
 
 struct AddGoalView: View {
