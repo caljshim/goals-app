@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     plaid_env: str = "sandbox"
     plaid_products: str = "transactions"
     plaid_country_codes: str = "US"
+    # Required by Plaid for OAuth institutions in native iOS Link. Must be an
+    # HTTPS Universal Link registered in the Plaid Dashboard.
+    plaid_redirect_uri: str = ""
     database_url: str = "sqlite:///./money.db"
 
     # --- investing: tastytrade OAuth. "cert" = sandbox (safe); anything else = production. ---

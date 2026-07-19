@@ -1,6 +1,6 @@
 from datetime import date
 
-from app.budget.models import Account, PlaidItem, Transaction
+from app.budget.models import Account, Budget, PlaidItem, Transaction
 
 
 def _seed_account(session):
@@ -22,6 +22,7 @@ def test_create_list_recategorize_delete(client, session):
     tid = resp.json()["id"]
     assert resp.json()["effective_category"] == "UNCATEGORIZED"
     assert resp.json()["is_manual"] is True
+    assert resp.json()["is_budgeted"] is False
 
     # list
     resp = client.get("/api/transactions")
@@ -31,6 +32,7 @@ def test_create_list_recategorize_delete(client, session):
     resp = client.patch(f"/api/transactions/{tid}", json={"user_category": "DINING"})
     assert resp.status_code == 200
     assert resp.json()["effective_category"] == "DINING"
+    assert resp.json()["is_budgeted"] is False
 
     # delete manual ok
     resp = client.delete(f"/api/transactions/{tid}")
@@ -59,3 +61,23 @@ def test_category_filter_uses_effective(client, session):
     resp = client.get("/api/transactions?category=DINING")
     names = [t["name"] for t in resp.json()]
     assert names == ["B"]
+
+
+def test_transaction_read_flags_budget_match_only_for_spending(client, session):
+    acc = _seed_account(session)
+    session.add(Budget(category="GROCERIES", monthly_limit=500))
+    session.add(Transaction(account_id=acc.id, date=date(2026, 7, 1), name="Food",
+                            amount=40.0, category="GROCERIES"))
+    session.add(Transaction(account_id=acc.id, date=date(2026, 7, 1), name="Movie",
+                            amount=20.0, category="ENTERTAINMENT"))
+    session.add(Transaction(account_id=acc.id, date=date(2026, 7, 1), name="Paycheck",
+                            amount=-2000.0, category="INCOME"))
+    session.add(Transaction(account_id=acc.id, date=date(2026, 7, 1), name="Transfer",
+                            amount=100.0, category="TRANSFER_OUT"))
+    session.commit()
+
+    by_name = {row["name"]: row for row in client.get("/api/transactions").json()}
+    assert by_name["Food"]["is_budgeted"] is True
+    assert by_name["Movie"]["is_budgeted"] is False
+    assert by_name["Paycheck"]["is_budgeted"] is None
+    assert by_name["Transfer"]["is_budgeted"] is None

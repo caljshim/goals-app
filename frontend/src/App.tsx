@@ -6,8 +6,9 @@ import Portfolio from "./components/Portfolio";
 import Dashboard from "./pages/Dashboard";
 import Finances from "./pages/Finances";
 import Goals from "./pages/Goals";
+import Routines from "./pages/Routines";
 
-const TABS = ["Dashboard", "Finances", "Goals", "Invest"] as const;
+const TABS = ["Dashboard", "Finances", "Goals", "Routines", "Invest"] as const;
 type Tab = (typeof TABS)[number];
 
 const SYNC_INTERVAL_MS = 15 * 60 * 1000;
@@ -91,6 +92,7 @@ export default function App() {
             {tab === "Dashboard" && <Dashboard />}
             {tab === "Finances" && <Finances />}
             {tab === "Goals" && <Goals />}
+            {tab === "Routines" && <Routines />}
             {tab === "Invest" && <Portfolio />}
           </div>
         </div>

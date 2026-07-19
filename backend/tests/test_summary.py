@@ -39,6 +39,26 @@ def test_budget_progress_uses_effective_category():
     assert groceries["spent"] == 80.0
     assert groceries["limit"] == 300.0
     assert groceries["remaining"] == 220.0
+    assert "pace" not in groceries
+
+
+def test_daily_weekly_and_monthly_budgets_can_coexist_for_one_category():
+    s = make_session()
+    as_of = date(2026, 7, 15)  # Wednesday; week is Sun Jul 12–Sat Jul 18
+    s.add(Transaction(account_id=1, date=date(2026, 7, 15), name="Today", amount=20.0, category="DINING"))
+    s.add(Transaction(account_id=1, date=date(2026, 7, 13), name="This week", amount=30.0, category="DINING"))
+    s.add(Transaction(account_id=1, date=date(2026, 7, 2), name="This month", amount=40.0, category="DINING"))
+    s.add(Budget(category="DINING", monthly_limit=25.0, period="daily"))
+    s.add(Budget(category="DINING", monthly_limit=100.0, period="weekly"))
+    s.add(Budget(category="DINING", monthly_limit=300.0, period="monthly"))
+    s.commit()
+
+    progress = build_summary(s, "2026-07", as_of=as_of)["budget_progress"]
+    by_period = {row["period"]: row for row in progress}
+    assert by_period["daily"]["spent"] == 20.0
+    assert by_period["weekly"]["spent"] == 50.0
+    assert by_period["monthly"]["spent"] == 90.0
+    assert by_period["weekly"]["window_start"] == date(2026, 7, 12)
 
 
 def test_complete_months_excludes_partial_leading_and_current_month():

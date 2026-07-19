@@ -38,7 +38,7 @@ export default function MerchantRules({
         <div className="px-3 pb-3">
           {rules.length === 0 && (
             <p className="text-xs text-slate-500 py-1">
-              No rules yet. Recategorizing a transaction below creates one. Or ask the copilot to
+              No rules yet. Recategorizing a transaction below creates one. Or ask Audel to
               “set up category rules from my history.”
             </p>
           )}

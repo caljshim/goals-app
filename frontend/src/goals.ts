@@ -1,5 +1,9 @@
 import type { Goal } from "./types";
 
+export function isRoutine(goal: Goal): boolean {
+  return goal.kind === "streak" || goal.period !== "once";
+}
+
 // Local day key ("YYYY-MM-DD") of a stored (UTC) timestamp.
 function dayKey(iso: string): string {
   const s = /[Zz]$|[+-]\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`;
@@ -34,13 +38,21 @@ export function groupAggregate(goals: Goal[]): number | null {
   const measurable = goals.filter((g) => g.target != null && g.target !== 0);
   if (measurable.length === 0) return null;
   const units = new Set(measurable.map((g) => g.unit));
-  if (units.size === 1) {
+  const directions = new Set(measurable.map((g) => g.direction));
+  if (units.size === 1 && directions.size === 1 && directions.has("reach")) {
     const cur = measurable.reduce((s, g) => s + g.current_value, 0);
     const tgt = measurable.reduce((s, g) => s + (g.target ?? 0), 0);
-    return tgt ? Math.round((cur / tgt) * 1000) / 10 : null;
+    if (!tgt) return null;
+    const raw = (cur / tgt) * 100;
+    return Math.round(raw * 10) / 10;
   }
   const pcts = measurable.map((g) => g.pct ?? 0);
   return Math.round((pcts.reduce((a, b) => a + b, 0) / pcts.length) * 10) / 10;
+}
+
+export function groupAggregateIsReversed(goals: Goal[]): boolean {
+  const measurable = goals.filter((g) => g.target != null && g.target !== 0);
+  return measurable.length > 0 && measurable.every((g) => g.direction === "under");
 }
 
 function mdFromKey(day: string): string {

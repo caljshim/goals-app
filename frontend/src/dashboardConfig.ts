@@ -5,15 +5,14 @@ export type StaticDashboardWidgetId =
   | "income-vs-expense"
   | "category-transactions"
   | "recent-transactions"
+  | "unbudgeted-transactions"
+  | "p2p-review"
   | "merchant-rules"
   | "manual-transaction"
   | "account-balances"
   | "account-sync"
   | "budget-progress"
   | "budget-form"
-  | "goal-todo-day"
-  | "goal-todo-week"
-  | "goal-todo-month"
   | "portfolio-summary"
   | "portfolio-positions";
 
@@ -22,7 +21,9 @@ export type DashboardWidgetId =
   | `goal:${number}`
   | `goal-name:${string}`
   | `goal-group:${string}`
-  | `goal-section:${"daily" | "weekly" | "monthly" | "interval" | "once" | "ongoing"}`;
+  | `goal-section:${"daily" | "weekly" | "monthly" | "interval" | "once" | "ongoing"}`
+  | `routine-group:${string}`
+  | `routine-section:${"daily" | "weekly" | "monthly" | "interval" | "ongoing"}`;
 
 export type DashboardUiAction =
   | { type: "dashboard.set_widgets"; widget_ids: DashboardWidgetId[] }
@@ -44,7 +45,7 @@ export const DEFAULT_DASHBOARD_WIDGETS: DashboardWidgetId[] = [
 export const DASHBOARD_WIDGETS: {
   id: StaticDashboardWidgetId;
   label: string;
-  source: "Finances" | "Goals" | "Invest";
+  source: "Finances" | "Goals" | "Routines" | "Invest";
   description: string;
 }[] = [
   { id: "left-to-spend", label: "Left to spend", source: "Finances", description: "Current budget remaining by category." },
@@ -53,15 +54,14 @@ export const DASHBOARD_WIDGETS: {
   { id: "income-vs-expense", label: "Income vs expense", source: "Finances", description: "Six-month cash-flow bar chart." },
   { id: "category-transactions", label: "Category transactions", source: "Finances", description: "Merchant groups by spending category." },
   { id: "recent-transactions", label: "Recent transactions", source: "Finances", description: "Latest transaction table with category and amount." },
+  { id: "unbudgeted-transactions", label: "Unbudgeted spending", source: "Finances", description: "Spending whose categories do not have monthly budgets." },
+  { id: "p2p-review", label: "Zelle & Venmo review", source: "Finances", description: "Review peer payments, link reimbursements, and categorize spending." },
   { id: "merchant-rules", label: "Merchant rules", source: "Finances", description: "Merchant-to-category automation rules." },
   { id: "manual-transaction", label: "Manual transaction", source: "Finances", description: "Add a manual transaction." },
   { id: "account-balances", label: "Account balances", source: "Finances", description: "Connected account cards and balances." },
   { id: "account-sync", label: "Account sync", source: "Finances", description: "Connect a bank or sync transactions." },
   { id: "budget-progress", label: "Budget progress", source: "Finances", description: "Monthly category budget progress bars." },
   { id: "budget-form", label: "Add budget", source: "Finances", description: "Create a new monthly category budget." },
-  { id: "goal-todo-day", label: "Daily to-do list", source: "Goals", description: "Today’s daily goals and recent misses." },
-  { id: "goal-todo-week", label: "Weekly to-do list", source: "Goals", description: "Scheduled goals for this and last week." },
-  { id: "goal-todo-month", label: "Monthly to-do list", source: "Goals", description: "Monthly goals due this and last month." },
   { id: "portfolio-summary", label: "Portfolio summary", source: "Invest", description: "Account value, cash, and buying power." },
   { id: "portfolio-positions", label: "Portfolio positions", source: "Invest", description: "Open investment positions." },
 ];
@@ -73,15 +73,22 @@ export function isDashboardWidgetId(id: string): id is DashboardWidgetId {
   if (/^goal:\d+$/.test(id)) return true;
   if (/^goal-name:.+/.test(id)) return true;
   if (/^goal-group:.+/.test(id)) return true;
-  return /^goal-section:(daily|weekly|monthly|interval|once|ongoing)$/.test(id);
+  if (/^goal-section:(daily|weekly|monthly|interval|once|ongoing)$/.test(id)) return true;
+  if (/^routine-group:.+/.test(id)) return true;
+  return /^routine-section:(daily|weekly|monthly|interval|ongoing)$/.test(id);
 }
 
 export function normalizeDashboardWidgets(ids: unknown): DashboardWidgetId[] {
   if (!Array.isArray(ids)) return [];
   const seen = new Set<DashboardWidgetId>();
   const out: DashboardWidgetId[] = [];
-  for (const id of ids) {
-    if (typeof id !== "string" || !isDashboardWidgetId(id)) continue;
+  for (const rawId of ids) {
+    if (typeof rawId !== "string") continue;
+    let id = rawId;
+    if (/^goal-section:(daily|weekly|monthly|interval|ongoing)$/.test(id)) {
+      id = id.replace("goal-section:", "routine-section:");
+    }
+    if (!isDashboardWidgetId(id)) continue;
     if (!seen.has(id)) {
       seen.add(id);
       out.push(id);

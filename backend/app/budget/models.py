@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from typing import Optional
 
+from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -46,9 +47,18 @@ class Transaction(SQLModel, table=True):
 
 
 class Budget(SQLModel, table=True):
+    """A category spending guardrail for one reset window.
+
+    The Python field keeps its legacy name so existing callers remain compatible;
+    `period` makes the amount daily, weekly, or monthly.
+    """
+    __tablename__ = "budgetrule"
+    __table_args__ = (UniqueConstraint("category", "period", name="uq_budgetrule_category_period"),)
+
     id: Optional[int] = Field(default=None, primary_key=True)
-    category: str = Field(index=True, unique=True)
+    category: str = Field(index=True)
     monthly_limit: float
+    period: str = Field(default="monthly", index=True)
 
 
 class MerchantRule(SQLModel, table=True):
@@ -69,18 +79,25 @@ class Category(SQLModel, table=True):
 class Goal(SQLModel, table=True):
     """A user-defined goal. `kind` selects the behavior (see budget.goal_types);
     the type-specific fields below are nullable and only some apply per kind:
-      save      -> target + (account_id link | manual current) [+ deadline]
-      spend_cap -> target + category (this month's spend)
+      save      -> legacy target + (account_id link | manual current) [+ deadline]
+      financial -> target + bank-derived value or manual current
+      spend_cap -> legacy spending goal, migrated to Budget
       numeric   -> target + manual current [+ deadline]
       streak    -> since (reset date) + best_days [+ target milestone days]
     Progress is computed at read time so linked goals reflect live data."""
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
-    kind: str = Field(index=True)  # save | spend_cap | numeric | streak
+    kind: str = Field(index=True)  # save (legacy) | spend_cap | financial | numeric | streak
     target: Optional[float] = None
     account_id: Optional[int] = Field(default=None, foreign_key="account.id")
     category: Optional[str] = None
     current: Optional[float] = None
+    # Immutable baseline for a numeric "under" goal. Progress runs from this
+    # starting value toward the lower target instead of assuming zero.
+    anchor_value: Optional[float] = None
+    financial_metric: Optional[str] = None
+    financial_rule: Optional[str] = None
+    financial_source: Optional[str] = None  # accounts | manual
     since: Optional[date] = None
     best_days: int = 0
     deadline: Optional[date] = None
@@ -98,15 +115,24 @@ class Goal(SQLModel, table=True):
     monthly_reset_day: int = Field(default=1)
     interval_days: Optional[int] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    # Goals are never physically deleted. Archiving removes them from active views
+    # while preserving their target, progress history, milestones, and check-ins.
+    archived_at: Optional[datetime] = Field(default=None, index=True)
 
 
 class GoalHistory(SQLModel, table=True):
-    """One recorded value of a manual goal at a point in time — the trajectory behind
-    the sparkline and pace stats. Written on create and on each manual progress change."""
+    """One recorded goal value at a point in time — manual progress entries plus
+    daily snapshots for bank-derived financial goals."""
     id: Optional[int] = Field(default=None, primary_key=True)
     goal_id: int = Field(foreign_key="goal.id", index=True)
     value: float
     at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class GoalAccountLink(SQLModel, table=True):
+    """Many-to-many source accounts for a flexible financial goal."""
+    goal_id: int = Field(foreign_key="goal.id", primary_key=True)
+    account_id: int = Field(foreign_key="account.id", primary_key=True)
 
 
 class GoalCheckin(SQLModel, table=True):

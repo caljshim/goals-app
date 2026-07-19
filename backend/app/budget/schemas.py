@@ -30,6 +30,9 @@ class TransactionRead(BaseModel):
     pending: bool
     is_manual: bool
     reimburses_transaction_id: Optional[int] = None
+    # True/false for spending transactions; null for income and transfers where a
+    # monthly spending budget does not apply.
+    is_budgeted: Optional[bool] = None
 
 
 class TransactionCreate(BaseModel):
@@ -70,15 +73,18 @@ class BudgetRead(BaseModel):
     id: int
     category: str
     monthly_limit: float
+    period: str = "monthly"
 
 
 class BudgetCreate(BaseModel):
     category: str
     monthly_limit: float
+    period: str = "monthly"
 
 
 class BudgetUpdate(BaseModel):
     monthly_limit: float
+    period: Optional[str] = None
 
 
 class GoalCreate(BaseModel):
@@ -86,7 +92,11 @@ class GoalCreate(BaseModel):
     kind: str  # save | spend_cap | numeric | streak
     target: Optional[float] = None
     account_id: Optional[int] = None
+    account_ids: list[int] = []
     category: Optional[str] = None
+    financial_metric: Optional[str] = None
+    financial_rule: Optional[str] = None
+    financial_source: Optional[str] = None
     current: Optional[float] = None
     since: Optional[date] = None
     deadline: Optional[date] = None
@@ -106,7 +116,11 @@ class GoalUpdate(BaseModel):
     name: Optional[str] = None
     target: Optional[float] = None
     account_id: Optional[int] = None
+    account_ids: Optional[list[int]] = None
     category: Optional[str] = None
+    financial_metric: Optional[str] = None
+    financial_rule: Optional[str] = None
+    financial_source: Optional[str] = None
     deadline: Optional[date] = None
     group: Optional[str] = None
     period: Optional[str] = None
@@ -118,6 +132,15 @@ class GoalUpdate(BaseModel):
     interval_days: Optional[int] = None
     direction: Optional[str] = None
     step: Optional[float] = None
+
+
+class GoalGroupUpdate(BaseModel):
+    goal_ids: list[int]
+    name: str
+
+
+class GoalGroupEnd(BaseModel):
+    goal_ids: list[int]
 
 
 class GoalProgressUpdate(BaseModel):
@@ -158,8 +181,13 @@ class GoalRead(BaseModel):
     milestones: list[GoalHistoryRead] = []
     target: Optional[float] = None
     account_id: Optional[int] = None
+    account_ids: list[int] = []
     category: Optional[str] = None
+    financial_metric: Optional[str] = None
+    financial_rule: Optional[str] = None
+    financial_source: Optional[str] = None
     current: Optional[float] = None
+    anchor_value: Optional[float] = None
     since: Optional[date] = None
     deadline: Optional[date] = None
     period: str = "once"
@@ -179,6 +207,7 @@ class GoalRead(BaseModel):
     linked_label: Optional[str] = None
     days: Optional[int] = None
     best_days: Optional[int] = None
+    archived_at: Optional[datetime] = None
 
 
 class ExchangeRequest(BaseModel):

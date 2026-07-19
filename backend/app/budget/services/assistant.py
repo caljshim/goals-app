@@ -29,7 +29,7 @@ SYSTEM = (
     "spending totals automatically (incoming reimbursements reduce it, outgoing payments add "
     "to it); avg_monthly_p2p_net in get_overview shows that net (negative = net reimbursed).\n\n"
     "You have tools to read the user's financial overview and individual transactions, "
-    "recategorize transactions, and set monthly budgets.\n\n"
+    "recategorize transactions, and set daily, weekly, or monthly budgets.\n\n"
     "Guidelines:\n"
     "- Call get_overview before proposing a budget OR recategorizing — it returns "
     "known_categories, the user's real spending buckets.\n"
@@ -148,32 +148,52 @@ def _overview(session: Session) -> tuple[dict, None]:
         "avg_monthly_spend_total": round((sum(spend.values()) + p2p_net) / divisor, 2),
         "avg_monthly_p2p_net": round(p2p_net / divisor, 2),
         "avg_monthly_by_category": by_category,
-        "current_budgets": [{"category": b.category, "monthly_limit": b.monthly_limit} for b in budgets],
+        "current_budgets": [{"category": b.category, "limit": b.monthly_limit,
+                             "monthly_limit": b.monthly_limit, "period": b.period} for b in budgets],
         "known_categories": known,
     }, None
 
 
-def _list_transactions(session: Session, month=None, category=None, limit=50) -> tuple[dict, None]:
+def _list_transactions(
+    session: Session,
+    month=None,
+    category=None,
+    limit=50,
+    review_scope=None,
+) -> tuple[dict, None]:
     limit = min(max(int(limit or 50), 1), 200)
     cat = _normalize_category(category) if category else None
+    scope = (review_scope or "").strip().lower()
+    if scope not in {"", "unbudgeted", "peer_payments"}:
+        return {"error": f"unknown review_scope: {review_scope}"}, None
     rows = session.exec(
         select(Transaction).order_by(Transaction.date.desc(), Transaction.id.desc())
     ).all()
     rules = load_rules(session)
+    budget_categories = set(session.exec(select(Budget.category)).all())
     out = []
     for t in rows:
-        if is_transfer(t):
-            continue
         ec = effective_category(t, rules)
+        if scope == "peer_payments":
+            # Match the same unresolved review queue as the frontends. Resolved P2P
+            # rows have either a one-off category or a reimbursement link.
+            if not is_p2p(t) or t.user_category is not None or t.reimburses_transaction_id is not None:
+                continue
+        else:
+            if is_transfer(t):
+                continue
+            if scope == "unbudgeted" and not (t.amount > 0 and ec not in budget_categories):
+                continue
         if (month and _month_key(t.date) != month) or (cat and ec != cat):
             continue
         out.append({
             "id": t.id, "date": t.date.isoformat(),
             "name": t.merchant_name or t.name, "amount": t.amount, "category": ec,
+            "direction": "incoming" if t.amount < 0 else "outgoing",
         })
         if len(out) >= limit:
             break
-    return {"transactions": out, "count": len(out)}, None
+    return {"transactions": out, "count": len(out), "review_scope": scope or None}, None
 
 
 def _recategorize(session: Session, transaction_ids, category) -> tuple[dict, str | None]:
@@ -205,16 +225,24 @@ def _recategorize(session: Session, transaction_ids, category) -> tuple[dict, st
     return result, action
 
 
-def _delete_budget(session: Session, category) -> tuple[dict, str | None]:
+def _delete_budget(session: Session, category, period="monthly") -> tuple[dict, str | None]:
     cat = _normalize_category(category)
     if not cat:
         return {"error": "category is required"}, None
-    budget = session.exec(select(Budget).where(Budget.category == cat)).first()
+    period = str(period or "monthly").lower()
+    budget = session.exec(select(Budget).where(
+        Budget.category == cat, Budget.period == period
+    )).first()
     if not budget:
-        return {"error": f"no budget exists for {cat}"}, None
+        message = f"no budget exists for {cat}" if period == "monthly" else f"no {period} budget exists for {cat}"
+        return {"error": message}, None
     session.delete(budget)
     session.commit()
-    return {"category": cat, "deleted": True}, f"Deleted budget {cat}"
+    action = f"Deleted budget {cat}" if period == "monthly" else f"Deleted {period} budget {cat}"
+    payload = {"category": cat, "deleted": True}
+    if period != "monthly":
+        payload["period"] = period
+    return payload, action
 
 
 def _add_category(session: Session, name) -> tuple[dict, str | None]:
@@ -250,21 +278,31 @@ def _bootstrap_rules(session: Session) -> tuple[dict, str | None]:
     return out, action
 
 
-def _set_budget(session: Session, category, monthly_limit) -> tuple[dict, str | None]:
+def _set_budget(session: Session, category, monthly_limit=None, period="monthly", limit=None) -> tuple[dict, str | None]:
     cat = _normalize_category(category)
     if not cat:
         return {"error": "category is required"}, None
-    limit = float(monthly_limit)
-    existing = session.exec(select(Budget).where(Budget.category == cat)).first()
+    period = str(period or "monthly").lower()
+    if period not in {"daily", "weekly", "monthly"}:
+        return {"error": "period must be daily, weekly, or monthly"}, None
+    amount = float(limit if limit is not None else monthly_limit)
+    if amount <= 0:
+        return {"error": "budget limit must be positive"}, None
+    existing = session.exec(select(Budget).where(
+        Budget.category == cat, Budget.period == period
+    )).first()
     verb = "Updated" if existing else "Added"
     if existing:
-        existing.monthly_limit = limit
+        existing.monthly_limit = amount
         session.add(existing)
     else:
-        session.add(Budget(category=cat, monthly_limit=limit))
+        session.add(Budget(category=cat, monthly_limit=amount, period=period))
     _ensure_category(session, cat)
     session.commit()
-    return {"category": cat, "monthly_limit": limit, "created": not existing}, f"{verb} budget {cat} = ${limit:,.0f}"
+    action = (f"{verb} budget {cat} = ${amount:,.0f}" if period == "monthly"
+              else f"{verb} {period} budget {cat} = ${amount:,.0f}")
+    return {"category": cat, "limit": amount, "monthly_limit": amount,
+            "period": period, "created": not existing}, action
 
 
 TOOLS = [
@@ -283,8 +321,10 @@ TOOLS = [
     {
         "name": "list_transactions",
         "description": (
-            "List individual transactions (newest first, transfers excluded) to review "
-            "categories. Optionally filter by month (YYYY-MM) or category (UPPER_SNAKE_CASE)."
+            "List individual transactions (newest first) to review categories. Transfers are "
+            "excluded by default. Optionally filter by month (YYYY-MM), category "
+            "(UPPER_SNAKE_CASE), or review_scope. Use review_scope='unbudgeted' for spending "
+            "without a matching budget, or 'peer_payments' for unresolved Zelle/Venmo rows."
         ),
         "input_schema": {
             "type": "object",
@@ -292,6 +332,11 @@ TOOLS = [
                 "month": {"type": "string", "description": "YYYY-MM"},
                 "category": {"type": "string", "description": "UPPER_SNAKE_CASE category filter"},
                 "limit": {"type": "integer", "description": "Max rows (default 50, max 200)"},
+                "review_scope": {
+                    "type": "string",
+                    "enum": ["unbudgeted", "peer_payments"],
+                    "description": "Optional app review queue to inspect.",
+                },
             },
             "required": [],
         },
@@ -347,24 +392,27 @@ TOOLS = [
     {
         "name": "set_budget",
         "description": (
-            "Create or update a monthly budget limit for a category (UPPER_SNAKE_CASE). Apply "
+            "Create or update a daily, weekly, or monthly spending limit for a category "
+            "(UPPER_SNAKE_CASE). Apply "
             "directly when the user's intent is clear; summarize changes afterward."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "category": {"type": "string"},
-                "monthly_limit": {"type": "number"},
+                "limit": {"type": "number"},
+                "period": {"type": "string", "enum": ["daily", "weekly", "monthly"]},
             },
-            "required": ["category", "monthly_limit"],
+            "required": ["category", "limit", "period"],
         },
     },
     {
         "name": "delete_budget",
-        "description": "Delete the budget for a category (UPPER_SNAKE_CASE).",
+        "description": "Delete one period's budget for a category (UPPER_SNAKE_CASE).",
         "input_schema": {
             "type": "object",
-            "properties": {"category": {"type": "string"}},
+            "properties": {"category": {"type": "string"},
+                           "period": {"type": "string", "enum": ["daily", "weekly", "monthly"]}},
             "required": ["category"],
         },
     },
@@ -384,13 +432,20 @@ TOOLS = [
 
 _HANDLERS = {
     "get_overview": lambda s, i: _overview(s),
-    "list_transactions": lambda s, i: _list_transactions(s, i.get("month"), i.get("category"), i.get("limit", 50)),
+    "list_transactions": lambda s, i: _list_transactions(
+        s,
+        i.get("month"),
+        i.get("category"),
+        i.get("limit", 50),
+        i.get("review_scope"),
+    ),
     "recategorize": lambda s, i: _recategorize(s, i.get("transaction_ids", []), i.get("category", "")),
     "set_merchant_rule": lambda s, i: _set_merchant_rule(s, i.get("merchant", ""), i.get("category", "")),
     "list_merchant_rules": lambda s, i: _list_merchant_rules(s),
     "bootstrap_rules": lambda s, i: _bootstrap_rules(s),
-    "set_budget": lambda s, i: _set_budget(s, i.get("category", ""), i.get("monthly_limit")),
-    "delete_budget": lambda s, i: _delete_budget(s, i.get("category", "")),
+    "set_budget": lambda s, i: _set_budget(s, i.get("category", ""), i.get("monthly_limit"),
+                                            i.get("period", "monthly"), i.get("limit")),
+    "delete_budget": lambda s, i: _delete_budget(s, i.get("category", ""), i.get("period", "monthly")),
     "add_category": lambda s, i: _add_category(s, i.get("name", "")),
 }
 

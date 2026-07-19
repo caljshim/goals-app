@@ -39,8 +39,9 @@ def test_log_progress_tool_adds_a_delta():
 
 def test_create_goal_tool_surfaces_validation_error():
     s = make_session()
-    data, action = ga._create_goal(s, {"name": "x", "kind": "spend_cap", "target": 100})  # no category
+    data, action = ga._create_goal(s, {"name": "x", "kind": "spend_cap", "target": 100})
     assert "error" in data and action is None
+    assert "Budgets" in data["error"]
 
 
 def test_tools_registered():

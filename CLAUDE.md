@@ -44,8 +44,15 @@
   domains separated in their subpackages; share only via `app/config.py` and the copilot.
 - Don't guess the tastytrade SDK surface — introspect the installed package or check its
   docs before writing adapter code.
-- Tests: `cd backend && .venv\Scripts\python.exe -m pytest -q`;
+- Tests: `cd backend && .venv\Scripts\python.exe -m pytest -q` (Windows) or
+  `cd backend && venv/bin/python -m pytest -q` (macOS — note `venv`, not `.venv`);
   `cd frontend && npm run test -- --run`.
+
+- Every new feature or behavior change that touches the backend MUST ship with a pytest
+  covering it. These tests are the backwards-compatibility contract: they pin down API
+  shapes and behavior so later changes that would break existing clients (React, iOS,
+  copilot) fail loudly in the suite. Prefer deterministic tests — freeze/monkeypatch
+  dates rather than depending on `date.today()`, so tests don't rot as the calendar moves.
 
 - If you think my approach to a problem is not the best/most efficent way to tackle an issue CHALLENGE ME. Give a recommendation you think is better and we can discuss.
 

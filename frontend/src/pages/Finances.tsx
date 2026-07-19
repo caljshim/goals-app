@@ -1,5 +1,8 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { api } from "../api";
 import FinanceOverview from "../components/FinanceOverview";
+import { localMonthKey, unbudgetedTransactions } from "../unbudgeted";
+import type { Transaction } from "../types";
 import Accounts from "./Accounts";
 import Budgets from "./Budgets";
 import Transactions from "./Transactions";
@@ -9,6 +12,15 @@ type FinanceTab = (typeof FINANCE_TABS)[number];
 
 export default function Finances() {
   const [tab, setTab] = useState<FinanceTab>("Overview");
+  const [unbudgetedCount, setUnbudgetedCount] = useState(0);
+
+  const updateUnbudgetedCount = useCallback((transactions: Transaction[]) => {
+    setUnbudgetedCount(unbudgetedTransactions(transactions, localMonthKey()).length);
+  }, []);
+
+  useEffect(() => {
+    api.getTransactions().then(updateUnbudgetedCount).catch(() => {});
+  }, [tab, updateUnbudgetedCount]);
 
   return (
     <div className="grid gap-4">
@@ -27,13 +39,23 @@ export default function Finances() {
               }`}
             >
               {t}
+              {t === "Transactions" && unbudgetedCount > 0 && (
+                <span className="ml-1.5 inline-flex min-w-5 items-center justify-center rounded-full bg-amber-400 px-1.5 py-0.5 text-[10px] font-bold leading-none text-amber-950">
+                  {unbudgetedCount}
+                </span>
+              )}
             </button>
           ))}
         </nav>
       </div>
 
-      {tab === "Overview" && <FinanceOverview />}
-      {tab === "Transactions" && <Transactions />}
+      {tab === "Overview" && (
+        <FinanceOverview
+          onOpenTransactions={() => setTab("Transactions")}
+          onTransactionsChange={updateUnbudgetedCount}
+        />
+      )}
+      {tab === "Transactions" && <Transactions onTransactionsChange={updateUnbudgetedCount} />}
       {tab === "Accounts" && <Accounts />}
       {tab === "Budgets" && <Budgets />}
     </div>

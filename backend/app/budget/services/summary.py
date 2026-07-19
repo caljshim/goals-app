@@ -1,5 +1,6 @@
 from collections import defaultdict
-from datetime import date
+from calendar import monthrange
+from datetime import date, timedelta
 
 from sqlmodel import Session, select
 
@@ -10,6 +11,17 @@ from app.budget.services.rules import load_rules
 
 def _month_key(d) -> str:
     return f"{d.year:04d}-{d.month:02d}"
+
+
+def budget_window(period: str, as_of: date) -> tuple[date, date]:
+    """Inclusive window for a daily, Sunday-start weekly, or monthly budget."""
+    if period == "daily":
+        return as_of, as_of
+    if period == "weekly":
+        start = as_of - timedelta(days=(as_of.weekday() + 1) % 7)
+        return start, start + timedelta(days=6)
+    start = as_of.replace(day=1)
+    return start, as_of.replace(day=monthrange(as_of.year, as_of.month)[1])
 
 
 def data_covered_months(session: Session, months: list[str]) -> list[str]:
@@ -34,7 +46,9 @@ def _prev_months(month: str, n: int) -> list[str]:
     return list(reversed(out))
 
 
-def spend_by_category_in_range(session: Session, start, end) -> dict[str, float]:
+def spend_by_category_in_range(
+    session: Session, start, end, account_ids: set[int] | None = None
+) -> dict[str, float]:
     """Reimbursement/rule-aware spend per category over an inclusive [start, end] date
     range — the same accounting as build_summary's monthly spend, for any window
     (used by period-scoped spend-cap goals)."""
@@ -51,6 +65,8 @@ def spend_by_category_in_range(session: Session, start, end) -> dict[str, float]
     for t in txns:
         if not (start <= t.date <= end):
             continue
+        if account_ids and t.account_id not in account_ids:
+            continue
         if t.reimburses_transaction_id is not None:
             continue  # folded into the target expense
         if is_incoming_p2p(t):
@@ -66,7 +82,37 @@ def spend_by_category_in_range(session: Session, start, end) -> dict[str, float]
     return {c: round(v, 2) for c, v in spend.items()}
 
 
-def build_summary(session: Session, month: str) -> dict:
+def cash_flow_in_range(
+    session: Session, start, end, account_ids: set[int] | None = None
+) -> tuple[float, float]:
+    """Return reimbursement-aware (income, expense) for a financial-goal window."""
+    txns = session.exec(select(Transaction)).all()
+    rules = load_rules(session)
+    by_id = {t.id: t for t in txns}
+    reimbursed = defaultdict(float)
+    for t in txns:
+        target = by_id.get(t.reimburses_transaction_id) if t.reimburses_transaction_id else None
+        if target is not None and target.amount > 0:
+            reimbursed[target.id] += -t.amount
+    income = expense = 0.0
+    for t in txns:
+        if not (start <= t.date <= end) or (account_ids and t.account_id not in account_ids):
+            continue
+        if t.reimburses_transaction_id is not None:
+            continue
+        if is_incoming_p2p(t):
+            expense += t.amount
+        elif is_transfer(t):
+            if is_p2p(t):
+                expense += t.amount
+        elif t.amount >= 0:
+            expense += t.amount - min(reimbursed.get(t.id, 0.0), t.amount)
+        else:
+            income += -t.amount
+    return round(income, 2), round(expense, 2)
+
+
+def build_summary(session: Session, month: str, as_of: date | None = None) -> dict:
     txns = session.exec(select(Transaction)).all()
     rules = load_rules(session)
 
@@ -137,14 +183,26 @@ def build_summary(session: Session, month: str) -> dict:
         key=lambda x: x["total"], reverse=True,
     )
 
-    budgets = session.exec(select(Budget)).all()
+    budgets = session.exec(select(Budget).order_by(Budget.period, Budget.category)).all()
     budget_progress = []
+    today = as_of or date.today()
+    requested_year, requested_month = (int(value) for value in month.split("-"))
+    monthly_as_of = date(requested_year, requested_month, min(
+        today.day, monthrange(requested_year, requested_month)[1]
+    ))
+    spend_by_period: dict[str, dict[str, float]] = {}
     for b in budgets:
-        spent = round(spend.get(b.category, 0.0), 2)
+        period = b.period if b.period in {"daily", "weekly", "monthly"} else "monthly"
+        anchor = monthly_as_of if period == "monthly" else today
+        start, end = budget_window(period, anchor)
+        if period not in spend_by_period:
+            spend_by_period[period] = spend_by_category_in_range(session, start, end)
+        spent = round(spend_by_period[period].get(b.category, 0.0), 2)
         remaining = round(b.monthly_limit - spent, 2)
         pct = round(spent / b.monthly_limit * 100, 1) if b.monthly_limit else 0.0
         budget_progress.append({
-            "category": b.category, "limit": b.monthly_limit,
+            "budget_id": b.id, "category": b.category, "period": period,
+            "window_start": start, "window_end": end, "limit": b.monthly_limit,
             "spent": spent, "remaining": remaining, "pct": pct,
         })
 

@@ -27,6 +27,15 @@ def test_save_goal_reached_status():
     assert goal_progress(Goal(name="Trip", kind="save", target=2000.0, current=2100.0), ctx())["status"] == "reached"
 
 
+def test_manual_financial_goal_uses_manual_current_with_currency():
+    goal = Goal(name="Trip", kind="financial", financial_source="manual",
+                financial_metric="account_balance", financial_rule="reach",
+                target=2000.0, current=900.0)
+    progress = goal_progress(goal, ctx())
+    assert progress["current_value"] == 900.0 and progress["pct"] == 45.0
+    assert progress["unit"] == "$" and progress["linked_label"] == "Manual"
+
+
 def test_spend_cap_monthly_by_default():
     g = Goal(name="Eat", kind="spend_cap", target=400.0, category="EATING_OUT", period="monthly")
     under = goal_progress(g, ctx(category_spend_by_period={"monthly": {"EATING_OUT": 310.0}}))
@@ -52,12 +61,15 @@ def test_numeric_reach_is_the_default_direction():
     assert goal_progress(Goal(name="Net worth", kind="numeric", target=100.0, current=120.0), ctx())["status"] == "reached"
 
 
-def test_numeric_under_direction_flips_status():
-    under = Goal(name="Subs", kind="numeric", target=100.0, current=80.0, direction="under")
-    p = goal_progress(under, ctx())
-    assert p["status"] == "under" and p["pct"] == 80.0
-    over = Goal(name="Subs", kind="numeric", target=100.0, current=120.0, direction="under")
-    assert goal_progress(over, ctx())["status"] == "over"
+def test_numeric_under_progress_runs_from_anchor_to_lower_target():
+    active = Goal(name="Weight", kind="numeric", target=180.0, current=190.0,
+                  anchor_value=200.0, direction="under")
+    p = goal_progress(active, ctx())
+    assert p["status"] == "active" and p["pct"] == 50.0
+    reached = Goal(name="Weight", kind="numeric", target=180.0, current=175.0,
+                   anchor_value=200.0, direction="under")
+    done = goal_progress(reached, ctx())
+    assert done["status"] == "reached" and done["pct"] == 125.0
 
 
 def test_recurring_manual_resets_when_period_anchor_is_stale():

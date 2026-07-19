@@ -6,7 +6,7 @@ function tx(p: Partial<Transaction>): Transaction {
   return {
     id: 1, account_id: 1, date: "2026-07-01", name: "x", merchant_name: null,
     amount: 10, category: null, user_category: null, effective_category: "UNCATEGORIZED",
-    pending: false, is_manual: false, reimburses_transaction_id: null, ...p,
+    pending: false, is_manual: false, reimburses_transaction_id: null, is_budgeted: false, ...p,
   };
 }
 

@@ -9,6 +9,7 @@ import {
   type DashboardWidgetId,
 } from "../dashboardConfig";
 import { DashboardWidgetContent } from "../components/dashboardWidgets";
+import { isRoutine } from "../goals";
 import type { Goal } from "../types";
 
 const SECTION_LABEL: Record<string, string> = {
@@ -17,7 +18,7 @@ const SECTION_LABEL: Record<string, string> = {
   monthly: "Monthly",
   interval: "Every N days",
   once: "One-time",
-  ongoing: "Ongoing",
+  ongoing: "Streaks",
 };
 
 function goalSection(g: Goal): "daily" | "weekly" | "monthly" | "interval" | "once" | "ongoing" {
@@ -29,13 +30,20 @@ function widgetMeta(id: DashboardWidgetId, goals: Goal[]) {
   if (staticMeta) return staticMeta;
   if (id.startsWith("goal:")) {
     const goal = goals.find((g) => g.id === Number(id.slice("goal:".length)));
-    return { id, label: goal?.name ?? `Goal ${id.slice("goal:".length)}`, source: "Goals", description: "Individual goal progress." };
+    return { id, label: goal?.name ?? `Goal ${id.slice("goal:".length)}`, source: goal && isRoutine(goal) ? "Routines" : "Goals", description: "Individual progress." };
   }
   if (id.startsWith("goal-name:")) {
     return { id, label: id.slice("goal-name:".length), source: "Goals", description: "Individual goal progress." };
   }
   if (id.startsWith("goal-group:")) {
     return { id, label: id.slice("goal-group:".length), source: "Goals", description: "Goal group." };
+  }
+  if (id.startsWith("routine-group:")) {
+    return { id, label: id.slice("routine-group:".length), source: "Routines", description: "Routine group." };
+  }
+  if (id.startsWith("routine-section:")) {
+    const section = id.slice("routine-section:".length);
+    return { id, label: SECTION_LABEL[section] ?? section, source: "Routines", description: "Routines by cadence." };
   }
   const section = id.slice("goal-section:".length);
   return { id, label: SECTION_LABEL[section] ?? section, source: "Goals", description: "Goals by cadence." };
@@ -129,19 +137,28 @@ export default function Dashboard() {
   const investItems = DASHBOARD_WIDGETS
     .filter((w) => w.source === "Invest")
     .map((w) => ({ id: w.id, label: w.label, description: w.description }));
-  const goalTodoItems = DASHBOARD_WIDGETS
-    .filter((w) => w.source === "Goals")
+  const routineTodoItems = DASHBOARD_WIDGETS
+    .filter((w) => w.source === "Routines")
     .map((w) => ({ id: w.id, label: w.label, description: w.description }));
-  const goalGroupItems = [...new Set(goals.filter((g) => g.group).map((g) => g.group as string))]
+  const goalGroupItems = [...new Set(goals.filter((g) => !isRoutine(g) && g.group).map((g) => g.group as string))]
     .sort()
     .map((group) => ({ id: `goal-group:${group}` as DashboardWidgetId, label: group, description: "All goals in this group." }));
-  const goalSectionItems = (["daily", "weekly", "monthly", "interval", "once", "ongoing"] as const)
-    .filter((section) => goals.some((g) => goalSection(g) === section))
+  const routineGroupItems = [...new Set(goals.filter((g) => isRoutine(g) && g.group).map((g) => g.group as string))]
+    .sort()
+    .map((group) => ({ id: `routine-group:${group}` as DashboardWidgetId, label: group, description: "All routines in this group." }));
+  const goalSectionItems = (["once"] as const)
+    .filter((section) => goals.some((g) => !isRoutine(g) && goalSection(g) === section))
     .map((section) => ({ id: `goal-section:${section}` as DashboardWidgetId, label: SECTION_LABEL[section], description: "All goals in this cadence." }));
-  const goalItems = goals
+  const routineSectionItems = (["daily", "weekly", "monthly", "interval", "ongoing"] as const)
+    .filter((section) => goals.some((g) => isRoutine(g) && goalSection(g) === section))
+    .map((section) => ({ id: `routine-section:${section}` as DashboardWidgetId, label: SECTION_LABEL[section], description: "All routines in this cadence." }));
+  const goalItems = goals.filter((g) => !isRoutine(g))
     .slice()
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((g) => ({ id: `goal:${g.id}` as DashboardWidgetId, label: g.name, description: g.group ? `Group: ${g.group}` : "Individual goal." }));
+  const routineItems = goals.filter(isRoutine)
+    .slice().sort((a, b) => a.name.localeCompare(b.name))
+    .map((g) => ({ id: `goal:${g.id}` as DashboardWidgetId, label: g.name, description: g.group ? `Group: ${g.group}` : "Individual routine." }));
 
   const commit = (next: DashboardWidgetId[]) => {
     setWidgets(next);
@@ -164,7 +181,7 @@ export default function Dashboard() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-xl font-semibold">Dashboard</h2>
-          <p className="text-sm text-slate-500">Pick individual widgets from Finances, Goals, and Invest.</p>
+          <p className="text-sm text-slate-500">Pick individual widgets from Finances, Goals, Routines, and Invest.</p>
         </div>
         <div className="flex gap-2">
           <button
@@ -189,11 +206,9 @@ export default function Dashboard() {
           <h3 className="mb-3 font-semibold">Add widgets</h3>
           <div className="grid gap-2">
             <WidgetDropdown label="Finances" groups={[{ label: "Finances", items: financeItems }]} active={active} onAdd={addWidget} />
-            <WidgetDropdown label="Invest" groups={[{ label: "Invest", items: investItems }]} active={active} onAdd={addWidget} />
             <WidgetDropdown
               label="Goals"
               groups={[
-                { label: "To-do lists", items: goalTodoItems },
                 { label: "Groups / categories", items: goalGroupItems },
                 { label: "Cadence", items: goalSectionItems },
                 { label: "Individual goals", items: goalItems },
@@ -201,13 +216,25 @@ export default function Dashboard() {
               active={active}
               onAdd={addWidget}
             />
+            <WidgetDropdown
+              label="Routines"
+              groups={[
+                { label: "Checklists", items: routineTodoItems },
+                { label: "Groups / categories", items: routineGroupItems },
+                { label: "Cadence", items: routineSectionItems },
+                { label: "Individual routines", items: routineItems },
+              ]}
+              active={active}
+              onAdd={addWidget}
+            />
+            <WidgetDropdown label="Invest" groups={[{ label: "Invest", items: investItems }]} active={active} onAdd={addWidget} />
           </div>
         </div>
       )}
 
       {widgets.length === 0 ? (
         <div className="rounded-xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-500">
-          Your dashboard is empty. Turn on Customize or ask Copilot to add dashboard widgets.
+          Your dashboard is empty. Turn on Customize or ask Audel to add dashboard widgets.
         </div>
       ) : (
         widgets.map((id, index) => {

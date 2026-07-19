@@ -1,32 +1,31 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { formatCurrency, formatDateFull, formatTimestampDate, prettifyCategory } from "../format";
-import { goalPace, groupAggregate } from "../goals";
+import { goalPace, groupAggregate, groupAggregateIsReversed, isRoutine } from "../goals";
 import GoalChart from "../components/GoalChart";
 import CategoryChart from "../components/CategoryChart";
-import { GoalTodoWidget } from "../components/dashboardWidgets";
-import type { Account, Goal, GoalKind, GoalPeriod, GoalDirection, GoalTask } from "../types";
+import type { Account, FinancialMetric, FinancialRule, FinancialSource, Goal, GoalKind, GoalPeriod, GoalDirection, GoalTask } from "../types";
 
 const KINDS: { value: GoalKind; label: string; icon: string }[] = [
-  { value: "save", label: "Savings goal", icon: "🎯" },
-  { value: "spend_cap", label: "Spending cap", icon: "🧾" },
+  { value: "financial", label: "Financial goal", icon: "💸" },
   { value: "numeric", label: "Numeric goal", icon: "📈" },
   { value: "streak", label: "Streak / days-since", icon: "🔥" },
 ];
-const ICON: Record<GoalKind, string> = { save: "🎯", spend_cap: "🧾", numeric: "📈", streak: "🔥" };
+const ICON: Record<GoalKind, string> = { save: "🎯", spend_cap: "🧾", financial: "💸", numeric: "📈", streak: "🔥" };
 const PERIOD_LABEL: Record<GoalPeriod, string> = { once: "", daily: "today", weekly: "this week", monthly: "this month", interval: "on its interval" };
 const WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"] as const;
 
-// Dashboard sections, in order. Streaks are continuous -> "Ongoing".
+// Dashboard sections, in order. Continuous routine tracking lives under Streaks.
 const SECTIONS: { key: string; label: string }[] = [
   { key: "daily", label: "Daily" },
   { key: "weekly", label: "Weekly" },
   { key: "monthly", label: "Monthly" },
   { key: "interval", label: "Every N days" },
   { key: "once", label: "One-time" },
-  { key: "ongoing", label: "Ongoing" },
+  { key: "ongoing", label: "Streaks" },
 ];
 const sectionOf = (g: Goal): string => (g.kind === "streak" ? "ongoing" : g.period);
+export type GoalCollectionMode = "goals" | "routines";
 
 function formatValue(v: number, unit: string): string {
   if (unit === "$") return formatCurrency(v);
@@ -46,17 +45,21 @@ function capitalize(value: string): string {
 }
 
 const emptyForm = {
-  kind: "save" as GoalKind, period: "once" as GoalPeriod, direction: "reach" as GoalDirection,
+  kind: "financial" as GoalKind, period: "once" as GoalPeriod, direction: "reach" as GoalDirection,
   name: "", target: "", account_id: "", category: "", current: "", since: "", deadline: "", step: "1", group: "", weekly_days: [] as string[],
   reset_time: "00:00", weekly_reset_day: "sunday", monthly_reset_day: "1", interval_days: "2",
+  financial_metric: "account_balance" as FinancialMetric,
+  financial_rule: "reach" as FinancialRule,
+  financial_source: "accounts" as FinancialSource,
+  account_ids: [] as string[],
 };
 
-export default function Goals() {
-  const [goals, setGoals] = useState<Goal[]>([]);
+export default function Goals({ mode = "goals" }: { mode?: GoalCollectionMode }) {
+  const [allGoals, setGoals] = useState<Goal[]>([]);
+  const goals = allGoals.filter((goal) => mode === "routines" ? isRoutine(goal) : !isRoutine(goal));
   const [tasks, setTasks] = useState<GoalTask[]>([]);
-  const [taskScope, setTaskScope] = useState<"day" | "week" | "month">("day");
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [form, setForm] = useState({ ...emptyForm });
+  const [form, setForm] = useState({ ...emptyForm, period: (mode === "routines" ? "daily" : "once") as GoalPeriod });
   const [error, setError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -71,7 +74,11 @@ export default function Goals() {
   const load = () => api.getGoals().then(setGoals).catch(() => setError("Failed to load goals."));
   const loadTasks = () => Promise.all([api.getGoalTasks("day"), api.getGoalTasks("week"), api.getGoalTasks("month")])
     .then((groups) => setTasks(groups.flat()));
-  useEffect(() => { load(); loadTasks(); api.getAccounts().then(setAccounts); }, []);
+  useEffect(() => {
+    load();
+    if (mode === "routines") loadTasks();
+    api.getAccounts().then(setAccounts);
+  }, [mode]);
 
   const set = (k: keyof typeof emptyForm, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -84,7 +91,17 @@ export default function Goals() {
       if (form.account_id) body.account_id = Number(form.account_id);
       else if (form.current) body.current = Number(form.current);
     }
-    if (k === "spend_cap") body.category = form.category.trim().toUpperCase().replace(/\s+/g, "_");
+    if (k === "financial") {
+      body.financial_source = form.financial_source;
+      body.financial_metric = form.financial_metric;
+      body.financial_rule = form.financial_rule;
+      if (form.financial_source === "manual") {
+        body.current = Number(form.current) || 0;
+        body.step = Number(form.step) || 1;
+      } else {
+        body.account_ids = form.account_ids.map(Number);
+      }
+    }
     if (k === "numeric") {
       if (form.current) body.current = Number(form.current);
       body.direction = form.direction;
@@ -100,12 +117,12 @@ export default function Goals() {
       if (form.period === "monthly") body.monthly_reset_day = Number(form.monthly_reset_day);
       if (form.period === "interval") body.interval_days = Number(form.interval_days);
     }
-    if (form.deadline && (k === "save" || k === "numeric")) body.deadline = form.deadline;
+    if (form.deadline && (k === "save" || k === "numeric" || k === "financial")) body.deadline = form.deadline;
     if (k === "save" || k === "numeric") body.step = Number(form.step) || 1;
     if (form.group.trim()) body.group = form.group.trim();
     try {
       await api.createGoal(body);
-      setForm({ ...emptyForm, kind: k });
+      setForm({ ...emptyForm, kind: k, period: mode === "routines" ? "daily" : "once" });
       setError(null);
       load();
     } catch (err) {
@@ -156,7 +173,7 @@ export default function Goals() {
   const saveGoalEdit = async (g: Goal) => {
     const body: Record<string, unknown> = { name: editDraft.name.trim(), group: editDraft.group.trim() || null };
     if (editDraft.target !== "") body.target = Number(editDraft.target);
-    if (g.kind === "save" || g.kind === "numeric") body.deadline = editDraft.deadline || null;
+    if (g.kind === "save" || g.kind === "numeric" || g.kind === "financial") body.deadline = editDraft.deadline || null;
     if (g.kind === "spend_cap") body.category = editDraft.category.trim().toUpperCase().replace(/\s+/g, "_");
     if (g.period === "weekly") body.weekly_days = editDraft.weekly_days;
     if (["daily", "weekly", "interval"].includes(g.period)) body.reset_time = editDraft.reset_time;
@@ -175,7 +192,8 @@ export default function Goals() {
     setRaiseId(null); setRaiseValue(""); load();
   };
 
-  const isManual = (g: Goal) => (g.kind === "save" && g.account_id === null) || g.kind === "numeric";
+  const isManual = (g: Goal) => (g.kind === "save" && g.account_id === null)
+    || g.kind === "numeric" || (g.kind === "financial" && g.financial_source === "manual");
 
   const card = (g: Goal) => {
     const manual = isManual(g);
@@ -253,7 +271,7 @@ export default function Goals() {
                   className="w-20 rounded border px-2 py-1" />
               </label>
             )}
-            {(g.kind === "save" || g.kind === "numeric") && (
+            {(g.kind === "save" || g.kind === "numeric" || g.kind === "financial") && (
               <input type="date" value={editDraft.deadline}
                 onChange={(e) => setEditDraft({ ...editDraft, deadline: e.target.value })}
                 className="border rounded px-2 py-1 w-full" />
@@ -335,7 +353,9 @@ export default function Goals() {
                 ) : (
                   <span className="font-semibold">{formatValue(g.current_value, g.unit)}</span>
                 )}
-                {g.target != null && <span className="text-slate-500"> / {formatValue(g.target, g.unit)}</span>}
+                {g.target != null && (
+                  <span className="text-slate-500"> {g.direction === "under" ? "→ <" : "/"} {formatValue(g.target, g.unit)}</span>
+                )}
               </span>
               <span className={`text-xs ${g.status === "over" ? "text-red-500" : "text-slate-500"}`}>
                 {g.pct != null ? `${g.pct}%` : ""}
@@ -343,12 +363,13 @@ export default function Goals() {
                 {g.status === "reached" && " · reached ✓"}
               </span>
             </div>
-            <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+            <div className={`h-2 bg-slate-100 rounded-full overflow-hidden flex ${g.direction === "under" ? "justify-end" : ""}`}>
               <div className={`h-full ${g.status === "over" ? "bg-red-500" : "bg-emerald-500"}`}
                 style={{ width: `${Math.min(g.pct ?? 0, 100)}%` }} />
             </div>
             <div className="flex items-center gap-2 mt-1.5 text-xs text-slate-400">
               {g.linked_label && <span>🔗 {g.kind === "spend_cap" ? prettifyCategory(g.linked_label) : g.linked_label}</span>}
+              {g.financial_metric && <span>· {prettifyCategory(g.financial_metric)}</span>}
               {PERIOD_LABEL[g.period] && <span>· {PERIOD_LABEL[g.period]}</span>}
               {g.period === "weekly" && scheduledDays.length > 0 && (
                 <span>· {scheduledDays.map((day) => day[0].toUpperCase() + day.slice(1)).join(", ")}</span>
@@ -375,7 +396,7 @@ export default function Goals() {
               )
             )}
 
-            {manual && (g.history.length >= 2 || g.milestones.length > 0) && (
+            {(g.history.length > 0 || g.milestones.length > 0) && (
               <div className="mt-2">
                 <button onClick={() => toggleGoal(g.id)}
                   className="text-xs text-slate-400 hover:text-slate-600 underline decoration-dotted">
@@ -383,7 +404,8 @@ export default function Goals() {
                 </button>
                 {expanded && (
                   <div className="mt-1.5 border-t border-slate-100 pt-1.5 text-xs">
-                    <GoalChart history={g.history} milestones={g.milestones} unit={g.unit} />
+                    <GoalChart history={g.history} milestones={g.milestones} unit={g.unit}
+                      target={g.target} storageKey={String(g.id)} />
                     {g.milestones.length > 0 && (
                       <div className="text-slate-500 mt-1">
                         🏅 {g.milestones.map((m) => `${formatValue(m.value, g.unit)} (${formatTimestampDate(m.at)})`).join(" · ")}
@@ -414,31 +436,18 @@ export default function Goals() {
         </div>
       )}
 
-      <section className="mb-5">
-        <div className="mb-2 flex items-center justify-between gap-3">
-          <h2 className="font-semibold">Goal checklist</h2>
-          <div className="flex rounded border border-slate-200 bg-white p-0.5">
-            {(["day", "week", "month"] as const).map((scope) => (
-              <button key={scope} type="button" onClick={() => setTaskScope(scope)}
-                className={`px-3 py-1 text-sm capitalize ${taskScope === scope ? "bg-slate-900 text-white" : "text-slate-600"}`}>
-                {scope}
-              </button>
-            ))}
-          </div>
-        </div>
-        <GoalTodoWidget scope={taskScope} allowOverdue onChange={loadTasks} />
-      </section>
-
       {/* Add-goal form: fields switch by kind */}
       <form onSubmit={add} className="flex flex-wrap items-end gap-2 mb-5 bg-white p-3 rounded-xl border border-slate-200">
         <label className="flex flex-col text-xs text-slate-500">Type
           <select value={form.kind}
             onChange={(e) => {
               const kind = e.target.value as GoalKind;
-              setForm((f) => ({ ...f, kind, period: kind === "spend_cap" ? "monthly" : "once" }));
+              const period: GoalPeriod = kind === "streak" ? "once" : mode === "routines" ? "daily" : "once";
+              setForm((f) => ({ ...f, kind, period }));
             }}
             className="border rounded px-2 py-1 text-sm">
-            {KINDS.map((k) => <option key={k.value} value={k.value}>{k.icon} {k.label}</option>)}
+            {KINDS.filter((k) => mode === "routines" || k.value === "financial" || k.value === "numeric")
+              .map((k) => <option key={k.value} value={k.value}>{k.icon} {k.label}</option>)}
           </select>
         </label>
         <label className="flex flex-col text-xs text-slate-500">Name
@@ -446,11 +455,10 @@ export default function Goals() {
             onChange={(e) => set("name", e.target.value)} className="border rounded px-2 py-1 text-sm w-44" />
         </label>
 
-        {form.kind !== "streak" && (
-          <label className="flex flex-col text-xs text-slate-500">Repeats
+        {(mode === "routines" || (form.kind === "financial" && ["income", "cash_flow"].includes(form.financial_metric))) && form.kind !== "streak" && (
+          <label className="flex flex-col text-xs text-slate-500">{form.kind === "financial" ? "Window" : "Repeats"}
             <select value={form.period} onChange={(e) => set("period", e.target.value)}
               className="border rounded px-2 py-1 text-sm">
-              {form.kind !== "spend_cap" && <option value="once">One-time</option>}
               <option value="daily">Daily</option>
               <option value="weekly">Weekly</option>
               <option value="monthly">Monthly</option>
@@ -515,6 +523,75 @@ export default function Goals() {
           </label>
         )}
 
+        {form.kind === "financial" && (
+          <>
+            <label className="flex flex-col text-xs text-slate-500">Track with
+              <select value={form.financial_source}
+                onChange={(e) => setForm((current) => ({
+                  ...current,
+                  financial_source: e.target.value as FinancialSource,
+                  financial_metric: "account_balance",
+                  financial_rule: "reach",
+                  account_ids: [],
+                  period: "once",
+                }))}
+                className="border rounded px-2 py-1 text-sm">
+                <option value="accounts">Linked accounts</option>
+                <option value="manual">Manual updates</option>
+              </select>
+            </label>
+            {form.financial_source === "accounts" && <>
+            <label className="flex flex-col text-xs text-slate-500">Metric
+              <select value={form.financial_metric} onChange={(e) => {
+                const metric = e.target.value as FinancialMetric;
+                const financial_rule: FinancialRule = metric === "debt_balance" ? "reduce_to" : "reach";
+                const period = ["income", "cash_flow"].includes(metric) ? "monthly" : "once";
+                setForm((current) => ({ ...current, financial_metric: metric, financial_rule, period }));
+              }} className="border rounded px-2 py-1 text-sm">
+                <option value="account_balance">Account balance</option>
+                <option value="debt_balance">Debt balance</option>
+                <option value="net_worth">Net worth</option>
+                <option value="income">Income</option>
+                <option value="cash_flow">Cash flow</option>
+              </select>
+            </label>
+            <label className="flex flex-col text-xs text-slate-500">Rule
+              <select value={form.financial_rule}
+                onChange={(e) => setForm((current) => ({ ...current, financial_rule: e.target.value as FinancialRule }))}
+                className="border rounded px-2 py-1 text-sm">
+                <option value="reach">Reach at least</option>
+                <option value="stay_under">Stay under</option>
+                <option value="reduce_to">Reduce to</option>
+              </select>
+            </label>
+            <fieldset className="min-w-44 text-xs text-slate-500">
+                <legend>Source accounts{["net_worth", "income", "cash_flow"].includes(form.financial_metric) ? " (optional)" : ""}</legend>
+                <div className="mt-1 max-h-24 overflow-y-auto rounded border border-slate-200 bg-white px-2 py-1">
+                  {accounts.map((account) => {
+                    const id = String(account.id);
+                    return <label key={account.id} className="flex items-center gap-2 py-0.5 text-xs text-slate-700">
+                      <input type="checkbox" checked={form.account_ids.includes(id)} onChange={() => setForm((current) => ({
+                        ...current,
+                        account_ids: current.account_ids.includes(id)
+                          ? current.account_ids.filter((value) => value !== id)
+                          : [...current.account_ids, id],
+                      }))} />
+                      <span>{account.name}</span>
+                    </label>;
+                  })}
+                  {accounts.length === 0 && <span>No linked accounts</span>}
+                </div>
+            </fieldset>
+            </>}
+            {form.financial_source === "manual" && (
+              <label className="flex flex-col text-xs text-slate-500">Current amount
+                <input type="number" step="0.01" placeholder="0" value={form.current}
+                  onChange={(e) => set("current", e.target.value)} className="border rounded px-2 py-1 text-sm w-28" />
+              </label>
+            )}
+          </>
+        )}
+
         {form.kind === "save" && (
           <>
             <label className="flex flex-col text-xs text-slate-500">Track via
@@ -533,12 +610,6 @@ export default function Goals() {
           </>
         )}
 
-        {form.kind === "spend_cap" && (
-          <label className="flex flex-col text-xs text-slate-500">Category
-            <input required placeholder="e.g. EATING_OUT" value={form.category}
-              onChange={(e) => set("category", e.target.value)} className="border rounded px-2 py-1 text-sm w-40" />
-          </label>
-        )}
 
         {form.kind === "numeric" && (
           <>
@@ -549,8 +620,9 @@ export default function Goals() {
                 <option value="under">Stay under</option>
               </select>
             </label>
-            <label className="flex flex-col text-xs text-slate-500">Current value
-              <input type="number" step="0.01" placeholder="0" value={form.current}
+            <label className="flex flex-col text-xs text-slate-500">{form.direction === "under" ? "Starting value" : "Current value"}
+              <input required={form.direction === "under"} type="number" step="0.01"
+                placeholder={form.direction === "under" ? "Required" : "0"} value={form.current}
                 onChange={(e) => set("current", e.target.value)} className="border rounded px-2 py-1 text-sm w-28" />
             </label>
           </>
@@ -569,14 +641,15 @@ export default function Goals() {
           </>
         )}
 
-        {(form.kind === "numeric" || (form.kind === "save" && !form.account_id)) && (
+        {(form.kind === "numeric" || (form.kind === "save" && !form.account_id)
+          || (form.kind === "financial" && form.financial_source === "manual")) && (
           <label className="flex flex-col text-xs text-slate-500">Step (± buttons)
             <input type="number" step="0.01" value={form.step}
               onChange={(e) => set("step", e.target.value)} className="border rounded px-2 py-1 text-sm w-24" />
           </label>
         )}
 
-        {(form.kind === "save" || form.kind === "numeric") && (
+        {(form.kind === "save" || form.kind === "numeric" || form.kind === "financial") && (
           <label className="flex flex-col text-xs text-slate-500">Target date
             <input type="date" value={form.deadline} onChange={(e) => set("deadline", e.target.value)}
               className="border rounded px-2 py-1 text-sm" />
@@ -588,15 +661,16 @@ export default function Goals() {
             onChange={(e) => set("group", e.target.value)} className="border rounded px-2 py-1 text-sm w-36" />
         </label>
 
-        <button className="px-3 py-1.5 rounded bg-slate-900 text-white text-sm">Add goal</button>
+        <button className="px-3 py-1.5 rounded bg-slate-900 text-white text-sm">Add {mode === "routines" ? "routine" : "goal"}</button>
       </form>
 
-      {goals.length === 0 && <p className="text-slate-500">No goals yet — add one above.</p>}
+      {goals.length === 0 && <p className="text-slate-500">No {mode} yet — add one above.</p>}
 
       {/* User-named groups first, each with a rolled-up bar. */}
       {[...new Set(goals.filter((g) => g.group).map((g) => g.group as string))].map((name) => {
         const members = goals.filter((g) => g.group === name);
         const agg = groupAggregate(members);
+        const reverse = groupAggregateIsReversed(members);
         return (
           <div key={`grp-${name}`} className="mb-5">
             <button onClick={() => toggleCategory(name)}
@@ -609,7 +683,7 @@ export default function Goals() {
               {agg != null && <span className="text-sm font-semibold text-emerald-600">{agg}%</span>}
             </button>
             {agg != null && (
-              <div className="h-2 bg-slate-100 rounded-full overflow-hidden mb-2">
+              <div className={`h-2 bg-slate-100 rounded-full overflow-hidden mb-2 flex ${reverse ? "justify-end" : ""}`}>
                 <div className="h-full bg-emerald-500" style={{ width: `${Math.min(agg, 100)}%` }} />
               </div>
             )}
@@ -628,6 +702,7 @@ export default function Goals() {
         const inSec = goals.filter((g) => !g.group && sectionOf(g) === sec.key);
         if (inSec.length === 0) return null;
         const agg = ["daily", "weekly", "monthly"].includes(sec.key) ? groupAggregate(inSec) : null;
+        const reverse = groupAggregateIsReversed(inSec);
         return (
           <div key={sec.key} className="mb-5">
             <div className="flex items-baseline justify-between mb-1">
@@ -635,7 +710,7 @@ export default function Goals() {
               {agg != null && <span className="text-sm font-semibold text-emerald-600">{agg}%</span>}
             </div>
             {agg != null && (
-              <div className="h-2 bg-slate-100 rounded-full overflow-hidden mb-2">
+              <div className={`h-2 bg-slate-100 rounded-full overflow-hidden mb-2 flex ${reverse ? "justify-end" : ""}`}>
                 <div className="h-full bg-emerald-500" style={{ width: `${Math.min(agg, 100)}%` }} />
               </div>
             )}

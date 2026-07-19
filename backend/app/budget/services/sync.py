@@ -23,14 +23,53 @@ def _account_map(session: Session, item_id: int) -> dict[str, int]:
     return {a.plaid_account_id: a.id for a in accounts}
 
 
-def _upsert(session: Session, acct_map: dict[str, int], data: dict) -> bool:
+def _natural_match(
+    session: Session,
+    account_id: int,
+    data: dict,
+    eligible_rows: set[int],
+    claimed_rows: set[int],
+) -> Transaction | None:
+    """Match a transaction from an old Plaid Item during a relink's first sync."""
+    candidates = session.exec(
+        select(Transaction).where(
+            Transaction.account_id == account_id,
+            Transaction.date == data["date"],
+            Transaction.name == data["name"],
+            Transaction.merchant_name == data["merchant_name"],
+            Transaction.amount == data["amount"],
+            Transaction.pending == data["pending"],
+        )
+    ).all()
+    return next(
+        (row for row in candidates if row.id in eligible_rows and row.id not in claimed_rows),
+        None,
+    )
+
+
+def _upsert(
+    session: Session,
+    acct_map: dict[str, int],
+    data: dict,
+    *,
+    reconcile_existing: bool = False,
+    eligible_rows: set[int] | None = None,
+    claimed_rows: set[int] | None = None,
+) -> bool:
     local_account_id = acct_map.get(data["plaid_account_id"])
     if local_account_id is None:
         return False
     existing = session.exec(
         select(Transaction).where(Transaction.plaid_transaction_id == data["plaid_transaction_id"])
     ).first()
+    eligible_rows = eligible_rows if eligible_rows is not None else set()
+    claimed_rows = claimed_rows if claimed_rows is not None else set()
+    if not existing and reconcile_existing:
+        existing = _natural_match(
+            session, local_account_id, data, eligible_rows, claimed_rows
+        )
     row = existing or Transaction(plaid_transaction_id=data["plaid_transaction_id"], account_id=local_account_id)
+    row.plaid_transaction_id = data["plaid_transaction_id"]
     row.account_id = local_account_id
     row.date = data["date"]
     row.name = data["name"]
@@ -39,6 +78,8 @@ def _upsert(session: Session, acct_map: dict[str, int], data: dict) -> bool:
     row.category = data["category"]
     row.pending = data["pending"]
     session.add(row)
+    if row.id is not None:
+        claimed_rows.add(row.id)
     return True
 
 
@@ -47,10 +88,24 @@ def sync_item(session: Session, item: PlaidItem, client) -> dict:
         counts = {"added": 0, "modified": 0, "removed": 0}
         acct_map = _account_map(session, item.id)
         cursor = item.sync_cursor
+        reconcile_existing = cursor is None
+        eligible_rows = set()
+        if reconcile_existing:
+            account_ids = list(acct_map.values())
+            if account_ids:
+                eligible_rows = set(session.exec(
+                    select(Transaction.id).where(Transaction.account_id.in_(account_ids))
+                ).all())
+        claimed_rows: set[int] = set()
         while True:
             page = plaid_client.sync_transactions(client, item.access_token, cursor)
             for data in page["added"]:
-                if _upsert(session, acct_map, data):
+                if _upsert(
+                    session, acct_map, data,
+                    reconcile_existing=reconcile_existing,
+                    eligible_rows=eligible_rows,
+                    claimed_rows=claimed_rows,
+                ):
                     counts["added"] += 1
             for data in page["modified"]:
                 if _upsert(session, acct_map, data):

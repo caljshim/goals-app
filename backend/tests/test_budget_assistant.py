@@ -78,6 +78,41 @@ def test_list_transactions_excludes_transfers():
     assert "Panda Express" in names
 
 
+def test_list_transactions_can_filter_unbudgeted_spending():
+    s = make_session(); seed(s)
+    assistant._set_budget(s, "FOOD_AND_DRINK", 300)
+
+    data, _ = assistant._list_transactions(s, review_scope="unbudgeted")
+
+    names = {t["name"] for t in data["transactions"]}
+    assert names == {"Safeway"}
+    assert data["review_scope"] == "unbudgeted"
+
+
+def test_list_transactions_can_include_unresolved_peer_payments():
+    s = make_session()
+    month = assistant._prev_complete_months(1)[0]
+    year, mon = (int(value) for value in month.split("-"))
+    unresolved = Transaction(
+        account_id=1, date=date(year, mon, 10), name="Zelle payment to Alex",
+        amount=42.0, category="TRANSFER_OUT",
+    )
+    resolved = Transaction(
+        account_id=1, date=date(year, mon, 11), name="Venmo payment to Sam",
+        amount=18.0, category="TRANSFER_OUT", user_category="FOOD_AND_DRINK",
+    )
+    card_payment = Transaction(
+        account_id=1, date=date(year, mon, 12), name="Payment to Chase",
+        amount=500.0, category="LOAN_PAYMENTS",
+    )
+    s.add_all([unresolved, resolved, card_payment]); s.commit()
+
+    data, _ = assistant._list_transactions(s, month=month, review_scope="peer_payments")
+
+    assert [row["name"] for row in data["transactions"]] == ["Zelle payment to Alex"]
+    assert data["transactions"][0]["direction"] == "outgoing"
+
+
 def test_set_budget_upserts_and_normalizes():
     s = make_session()
     data, action = assistant._set_budget(s, "food and drink", 300)

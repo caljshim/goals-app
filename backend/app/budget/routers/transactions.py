@@ -4,9 +4,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlmodel import Session, select
 
-from app.budget.categories import effective_category, merchant_key
+from app.budget.categories import TRANSFER_CATEGORIES, effective_category, merchant_key
 from app.budget.db import get_session
-from app.budget.models import Transaction
+from app.budget.models import Budget, Transaction
 from app.budget.services import rules as rules_svc
 from app.budget.services.rules import load_rules
 from app.budget.schemas import (
@@ -20,13 +20,26 @@ from app.budget.schemas import (
 router = APIRouter(prefix="/api", tags=["transactions"])
 
 
-def _to_read(txn: Transaction, rules: dict[str, str] | None = None) -> TransactionRead:
+def _budget_categories(session: Session) -> set[str]:
+    return set(session.exec(select(Budget.category)).all())
+
+
+def _to_read(
+    txn: Transaction,
+    rules: dict[str, str] | None = None,
+    budget_categories: set[str] | None = None,
+) -> TransactionRead:
+    category = effective_category(txn, rules)
+    is_budgeted = None
+    if txn.amount > 0 and category not in TRANSFER_CATEGORIES:
+        is_budgeted = category in (budget_categories or set())
     return TransactionRead(
         id=txn.id, account_id=txn.account_id, date=txn.date, name=txn.name,
         merchant_name=txn.merchant_name, amount=txn.amount, category=txn.category,
-        user_category=txn.user_category, effective_category=effective_category(txn, rules),
+        user_category=txn.user_category, effective_category=category,
         pending=txn.pending, is_manual=(txn.plaid_transaction_id is None),
         reimburses_transaction_id=txn.reimburses_transaction_id,
+        is_budgeted=is_budgeted,
     )
 
 
@@ -49,14 +62,15 @@ def list_transactions(
     rules = load_rules(session)
     if category:
         rows = [t for t in rows if effective_category(t, rules) == category]
-    return [_to_read(t, rules) for t in rows]
+    budget_categories = _budget_categories(session)
+    return [_to_read(t, rules, budget_categories) for t in rows]
 
 
 @router.post("/transactions", response_model=TransactionRead, status_code=201)
 def create_transaction(body: TransactionCreate, session: Session = Depends(get_session)):
     txn = Transaction(**body.model_dump())
     session.add(txn); session.commit(); session.refresh(txn)
-    return _to_read(txn, load_rules(session))
+    return _to_read(txn, load_rules(session), _budget_categories(session))
 
 
 @router.patch("/transactions/{txn_id}", response_model=TransactionRead)
@@ -69,7 +83,7 @@ def update_transaction(txn_id: int, body: TransactionUpdate, session: Session = 
     # drops any link (only reimbursements ever carry one, so this is a no-op otherwise).
     txn.reimburses_transaction_id = None
     session.add(txn); session.commit(); session.refresh(txn)
-    return _to_read(txn, load_rules(session))
+    return _to_read(txn, load_rules(session), _budget_categories(session))
 
 
 @router.patch("/transactions/{txn_id}/merchant-category", response_model=TransactionRead)
@@ -85,7 +99,7 @@ def set_merchant_category(txn_id: int, body: MerchantCategoryUpdate, session: Se
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     session.refresh(txn)
-    return _to_read(txn, load_rules(session))
+    return _to_read(txn, load_rules(session), _budget_categories(session))
 
 
 @router.patch("/transactions/{txn_id}/reimburses", response_model=TransactionRead)
@@ -100,7 +114,7 @@ def set_reimbursement(txn_id: int, body: ReimburseUpdate, session: Session = Dep
     if body.target_id is None:
         txn.reimburses_transaction_id = None
         session.add(txn); session.commit(); session.refresh(txn)
-        return _to_read(txn, load_rules(session))
+        return _to_read(txn, load_rules(session), _budget_categories(session))
 
     if body.target_id == txn_id:
         raise HTTPException(status_code=400, detail="A transaction cannot reimburse itself")
@@ -116,7 +130,7 @@ def set_reimbursement(txn_id: int, body: ReimburseUpdate, session: Session = Dep
     # Linking supersedes a category-only reimbursement — keep the two mutually exclusive.
     txn.user_category = None
     session.add(txn); session.commit(); session.refresh(txn)
-    return _to_read(txn, load_rules(session))
+    return _to_read(txn, load_rules(session), _budget_categories(session))
 
 
 @router.delete("/transactions/{txn_id}", status_code=204)

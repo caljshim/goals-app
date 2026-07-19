@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { Account, Budget, ChatMessage, ChatResponse, Goal, GoalTask, MerchantRule, Portfolio, Summary, Transaction } from "./types";
+import type { Account, Budget, BudgetPeriod, ChatMessage, ChatResponse, Goal, GoalTask, MerchantRule, Portfolio, Summary, Transaction } from "./types";
 
 const http = axios.create({ baseURL: "/api" });
 
@@ -24,10 +24,10 @@ export const api = {
     http.patch<Transaction>(`/transactions/${id}/reimburses`, { target_id }).then((r) => r.data),
   deleteTransaction: (id: number) => http.delete(`/transactions/${id}`),
   getBudgets: () => http.get<Budget[]>("/budgets").then((r) => r.data),
-  createBudget: (category: string, monthly_limit: number) =>
-    http.post<Budget>("/budgets", { category, monthly_limit }).then((r) => r.data),
-  updateBudget: (id: number, monthly_limit: number) =>
-    http.patch<Budget>(`/budgets/${id}`, { monthly_limit }).then((r) => r.data),
+  createBudget: (category: string, monthly_limit: number, period: BudgetPeriod = "monthly") =>
+    http.post<Budget>("/budgets", { category, monthly_limit, period }).then((r) => r.data),
+  updateBudget: (id: number, monthly_limit: number, period?: BudgetPeriod) =>
+    http.patch<Budget>(`/budgets/${id}`, { monthly_limit, ...(period ? { period } : {}) }).then((r) => r.data),
   deleteBudget: (id: number) => http.delete(`/budgets/${id}`),
   getSummary: (month: string) =>
     http.get<Summary>("/dashboard/summary", { params: { month } }).then((r) => r.data),

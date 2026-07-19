@@ -1,15 +1,20 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   Bar, BarChart, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { api } from "../api";
-import type { Account, BudgetProgress, Goal, GoalTask, Portfolio, Summary, Transaction } from "../types";
+import type { Account, BudgetPeriod, Goal, Portfolio, Summary, Transaction } from "../types";
 import { formatCurrency, formatDateFull, prettifyCategory } from "../format";
 import { filterTransactions } from "../search";
+import { isRoutine } from "../goals";
 import CategoryTransactions from "./CategoryTransactions";
 import MerchantRules from "./MerchantRules";
+import P2PReviewCard from "./P2PReviewCard";
 import PlaidLinkButton from "./PlaidLinkButton";
+import UnbudgetedTransactionsNotice from "./UnbudgetedTransactionsNotice";
+import { AddBudgetForm, BudgetPeriodPicker, BudgetProgressList } from "./BudgetWidgets";
 import type { DashboardWidgetId } from "../dashboardConfig";
+import { localMonthKey, unbudgetedTransactions } from "../unbudgeted";
 
 const COLORS = ["#0ea5e9", "#6366f1", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#14b8a6", "#f43f5e"];
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -213,6 +218,24 @@ export function RecentTransactionsWidget() {
   );
 }
 
+export function UnbudgetedTransactionsWidget() {
+  const [rows, setRows] = useState<Transaction[] | null>(null);
+  const load = useCallback(() => {
+    api.getTransactions().then(setRows).catch(() => setRows([]));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  if (rows === null) return <p className="text-slate-500">Loading...</p>;
+  const pending = unbudgetedTransactions(rows, localMonthKey());
+  return (
+    <Card>
+      <h3 className="mb-2 font-semibold">Unbudgeted spending</h3>
+      {pending.length > 0
+        ? <UnbudgetedTransactionsNotice transactions={rows} onCategorized={load} />
+        : <p className="text-sm text-slate-500">All current spending categories have monthly budgets.</p>}
+    </Card>
+  );
+}
+
 export function ManualTransactionWidget() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [form, setForm] = useState({ account_id: 0, date: "", name: "", amount: "" });
@@ -295,50 +318,30 @@ export function AccountSyncWidget() {
 
 export function BudgetProgressWidget() {
   const { summary } = useSummary();
+  const [period, setPeriod] = useState<BudgetPeriod>(() => {
+    const stored = localStorage.getItem("money.ui.dashboard.budgetPeriod");
+    return stored === "daily" || stored === "weekly" ? stored : "monthly";
+  });
+  const choosePeriod = (value: BudgetPeriod) => {
+    setPeriod(value);
+    localStorage.setItem("money.ui.dashboard.budgetPeriod", value);
+  };
   if (!summary) return <p className="text-slate-500">Loading...</p>;
-  return <BudgetProgressList progress={summary.budget_progress} />;
-}
-
-function BudgetProgressList({ progress }: { progress: BudgetProgress[] }) {
   return (
-    <div className="grid gap-3">
-      {progress.map((b) => (
-        <Card key={b.category}>
-          <div className="mb-1 flex justify-between">
-            <span className="font-medium">{prettifyCategory(b.category)}</span>
-            <span className="text-sm text-slate-500">{formatCurrency(b.spent)} / {formatCurrency(b.limit)}</span>
-          </div>
-          <div className="h-2 overflow-hidden rounded-full bg-slate-100">
-            <div className={`h-full ${b.pct > 100 ? "bg-red-500" : "bg-emerald-500"}`}
-              style={{ width: `${Math.min(b.pct, 100)}%` }} />
-          </div>
-        </Card>
-      ))}
-      {progress.length === 0 && <p className="text-slate-500">No budgets yet.</p>}
-    </div>
+    <Card>
+      <div className="mb-3"><BudgetPeriodPicker value={period} onChange={choosePeriod} /></div>
+      <BudgetProgressList progress={summary.budget_progress} period={period} />
+    </Card>
   );
 }
 
 export function BudgetFormWidget() {
-  const [form, setForm] = useState({ category: "", monthly_limit: "" });
   const [saved, setSaved] = useState(false);
-  const add = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await api.createBudget(form.category.toUpperCase().trim(), Number(form.monthly_limit));
-    setForm({ category: "", monthly_limit: "" });
-    setSaved(true);
-  };
   return (
     <Card>
       <h3 className="mb-3 font-semibold">Add budget</h3>
-      <form onSubmit={add} className="flex flex-wrap gap-2">
-        <input required placeholder="Category" value={form.category}
-          onChange={(e) => setForm({ ...form, category: e.target.value })} className="rounded border px-2 py-1" />
-        <input required type="number" step="0.01" placeholder="Monthly limit" value={form.monthly_limit}
-          onChange={(e) => setForm({ ...form, monthly_limit: e.target.value })} className="rounded border px-2 py-1" />
-        <button className="rounded bg-slate-900 px-3 py-1 text-sm text-white">Add budget</button>
-        {saved && <span className="self-center text-xs text-emerald-600">Saved</span>}
-      </form>
+      <AddBudgetForm defaultPeriod="monthly" onSaved={() => setSaved(true)} />
+      {saved && <span className="mt-2 block text-xs text-emerald-600">Saved</span>}
     </Card>
   );
 }
@@ -348,9 +351,10 @@ function goalSection(g: Goal): "daily" | "weekly" | "monthly" | "interval" | "on
 }
 
 function GoalMiniCard({ goal }: { goal: Goal }) {
+  const targetSeparator = goal.direction === "under" ? " → < " : " / ";
   const label = goal.unit === "$"
-    ? `${formatCurrency(goal.current_value)}${goal.target != null ? ` / ${formatCurrency(goal.target)}` : ""}`
-    : `${goal.current_value.toLocaleString()}${goal.target != null ? ` / ${goal.target.toLocaleString()}` : ""}`;
+    ? `${formatCurrency(goal.current_value)}${goal.target != null ? `${targetSeparator}${formatCurrency(goal.target)}` : ""}`
+    : `${goal.current_value.toLocaleString()}${goal.target != null ? `${targetSeparator}${goal.target.toLocaleString()}` : ""}`;
   return (
     <Card>
       <div className="mb-1 flex justify-between gap-2">
@@ -360,7 +364,7 @@ function GoalMiniCard({ goal }: { goal: Goal }) {
         </span>
       </div>
       <div className="mb-1 text-sm text-slate-500">{label}</div>
-      <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+      <div className={`h-2 overflow-hidden rounded-full bg-slate-100 flex ${goal.direction === "under" ? "justify-end" : ""}`}>
         <div className={`h-full ${goal.status === "over" ? "bg-red-500" : "bg-emerald-500"}`}
           style={{ width: `${Math.min(goal.pct ?? 0, 100)}%` }} />
       </div>
@@ -387,10 +391,21 @@ export function GoalWidget({ id }: { id: DashboardWidgetId }) {
     visible = goals.filter((g) => g.name.toLowerCase() === name);
   } else if (id.startsWith("goal-group:")) {
     const group = id.slice("goal-group:".length);
-    visible = goals.filter((g) => g.group === group);
+    const outcomeGoals = goals.filter((g) => g.group === group && !isRoutine(g));
+    // Older saved dashboards used goal-group for both outcomes and recurring work.
+    // Prefer the new meaning, but keep a routine-only legacy group visible.
+    visible = outcomeGoals.length > 0
+      ? outcomeGoals
+      : goals.filter((g) => g.group === group && isRoutine(g));
+  } else if (id.startsWith("routine-group:")) {
+    const group = id.slice("routine-group:".length);
+    visible = goals.filter((g) => g.group === group && isRoutine(g));
   } else if (id.startsWith("goal-section:")) {
     const section = id.slice("goal-section:".length);
-    visible = goals.filter((g) => goalSection(g) === section);
+    visible = goals.filter((g) => !isRoutine(g) && goalSection(g) === section);
+  } else if (id.startsWith("routine-section:")) {
+    const section = id.slice("routine-section:".length);
+    visible = goals.filter((g) => isRoutine(g) && goalSection(g) === section);
   }
 
   return (
@@ -398,42 +413,6 @@ export function GoalWidget({ id }: { id: DashboardWidgetId }) {
       {visible.map((g) => <GoalMiniCard key={g.id} goal={g} />)}
       {goals.length === 0 && <p className="text-slate-500">No goals yet.</p>}
       {goals.length > 0 && visible.length === 0 && <p className="text-slate-500">No matching goals.</p>}
-    </div>
-  );
-}
-
-export function GoalTodoWidget({ scope, allowOverdue = false, onChange }: {
-  scope: "day" | "week" | "month";
-  allowOverdue?: boolean;
-  onChange?: () => void;
-}) {
-  const [tasks, setTasks] = useState<GoalTask[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const load = () => api.getGoalTasks(scope).then(setTasks).catch(() => setError("Could not load goal tasks."));
-  useEffect(() => { load(); }, [scope]);
-
-  const toggle = async (task: GoalTask) => {
-    if (task.missed && !allowOverdue) return;
-    await api.setGoalCheckin(task.goal_id, task.scheduled_for, !task.completed, allowOverdue);
-    load();
-    onChange?.();
-  };
-
-  return (
-    <div className="divide-y divide-slate-100 border-y border-slate-200 bg-white">
-      {tasks.map((task) => (
-        <label key={`${task.goal_id}-${task.scheduled_for}`}
-          className={`flex items-center gap-3 px-1 py-3 ${task.missed ? "bg-red-50 text-red-700" : ""}`}>
-          <input type="checkbox" checked={task.completed} disabled={task.missed && !allowOverdue}
-            onChange={() => toggle(task)} className="h-4 w-4 accent-slate-900" />
-          <span className={`min-w-0 flex-1 ${task.completed ? "text-slate-400 line-through" : ""}`}>{task.name}</span>
-          <span className="shrink-0 text-xs">
-            {task.missed ? `Late · ${formatDateFull(task.scheduled_for)}` : formatDateFull(task.scheduled_for)}
-          </span>
-        </label>
-      ))}
-      {!error && tasks.length === 0 && <p className="py-4 text-sm text-slate-500">Nothing scheduled.</p>}
-      {error && <p className="py-4 text-sm text-red-600">{error}</p>}
     </div>
   );
 }
@@ -510,16 +489,15 @@ export function DashboardWidgetContent({ id, onChange }: { id: DashboardWidgetId
   if (id === "income-vs-expense") return <IncomeVsExpenseWidget />;
   if (id === "category-transactions") return <CategoryTransactions onChange={onChange} />;
   if (id === "recent-transactions") return <RecentTransactionsWidget />;
+  if (id === "unbudgeted-transactions") return <UnbudgetedTransactionsWidget />;
+  if (id === "p2p-review") return <P2PReviewCard embedded onChange={onChange} />;
   if (id === "merchant-rules") return <MerchantRules signal={0} onChange={onChange} />;
   if (id === "manual-transaction") return <ManualTransactionWidget />;
   if (id === "account-balances") return <AccountBalancesWidget />;
   if (id === "account-sync") return <AccountSyncWidget />;
   if (id === "budget-progress") return <BudgetProgressWidget />;
   if (id === "budget-form") return <BudgetFormWidget />;
-  if (id === "goal-todo-day") return <GoalTodoWidget scope="day" />;
-  if (id === "goal-todo-week") return <GoalTodoWidget scope="week" />;
-  if (id === "goal-todo-month") return <GoalTodoWidget scope="month" />;
-  if (id.startsWith("goal:") || id.startsWith("goal-name:") || id.startsWith("goal-group:") || id.startsWith("goal-section:")) {
+  if (id.startsWith("goal:") || id.startsWith("goal-name:") || id.startsWith("goal-group:") || id.startsWith("goal-section:") || id.startsWith("routine-group:") || id.startsWith("routine-section:")) {
     return <GoalWidget id={id} />;
   }
   if (id === "portfolio-summary") return <PortfolioSummaryWidget />;

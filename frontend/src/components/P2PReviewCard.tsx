@@ -20,11 +20,13 @@ function monthsAgoStart(n: number): string {
  *    assign a category, or keep it as a plain transfer.
  */
 export default function P2PReviewCard({
-  refreshSignal,
+  refreshSignal = 0,
   onChange,
+  embedded = false,
 }: {
-  refreshSignal: number;
+  refreshSignal?: number;
   onChange?: () => void;
+  embedded?: boolean;
 }) {
   const [txns, setTxns] = useState<Transaction[]>([]);
   const [busy, setBusy] = useState(false);
@@ -79,54 +81,71 @@ export default function P2PReviewCard({
     }
   };
 
-  if (hidden || (incoming.length === 0 && outgoing.length === 0)) return null;
+  if (hidden && !embedded) return null;
+  if (incoming.length === 0 && outgoing.length === 0) {
+    if (!embedded) return null;
+    return (
+      <div className="rounded-xl border border-slate-200 bg-white p-4">
+        <h3 className="font-semibold">Zelle & Venmo review</h3>
+        <p className="mt-1 text-sm text-slate-500">All peer payments have been reviewed.</p>
+      </div>
+    );
+  }
   const total = incoming.length + outgoing.length;
 
   return (
-    <div className="fixed bottom-4 left-4 z-50 w-[26rem] max-w-[calc(100vw-2rem)] bg-white rounded-xl border border-slate-300 shadow-lg">
+    <div className={embedded
+      ? "w-full rounded-xl border border-slate-200 bg-white"
+      : "fixed bottom-4 left-4 z-50 w-[26rem] max-w-[calc(100vw-2rem)] rounded-xl border border-slate-300 bg-white shadow-lg"}>
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-200">
         <span className="font-semibold text-sm">
           💸 Review {total} Zelle/Venmo payment{total > 1 ? "s" : ""}
         </span>
-        <button onClick={() => setHidden(true)} title="Hide until next visit"
-          className="text-slate-400 hover:text-slate-600 text-sm">✕</button>
+        {!embedded && (
+          <button onClick={() => setHidden(true)} title="Hide until next visit"
+            className="text-sm text-slate-400 hover:text-slate-600">✕</button>
+        )}
       </div>
 
       <div className="max-h-80 overflow-y-auto p-3 space-y-3">
         {incoming.length > 0 && (
           <div className="space-y-2">
-            <p className="text-xs font-medium text-slate-600">Received — reduce a budget</p>
+            <p className="text-xs font-medium text-slate-600">Received — reimburse an expense</p>
             <p className="text-xs text-slate-500">
-              Money people sent you. Link it to the expense it pays back (reduces that
-              budget), assign a category, or keep it as a plain transfer.
+              Link it to the exact expense, apply it to a budget, or mark it as not a
+              reimbursement so it does not change spending.
             </p>
             {incoming.map((t) => (
               <div key={t.id} className="text-xs border border-slate-100 rounded-lg px-2 py-1.5">
-                <div className="flex items-center gap-2">
+                <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-slate-700">{t.name}</div>
                     <div className="text-emerald-600">{formatDateFull(t.date)} · {formatCurrency(t.amount)}</div>
                   </div>
+                </div>
+                <div className="mt-1.5 flex flex-wrap items-center gap-2">
                   <button
                     onClick={() => setLinkingId(linkingId === t.id ? null : t.id)}
                     disabled={busy}
-                    className="text-slate-600 hover:text-slate-900 shrink-0"
+                    className="shrink-0 whitespace-nowrap text-slate-600 hover:text-slate-900"
                   >
-                    {linkingId === t.id ? "Close" : "Link"}
+                    {linkingId === t.id ? "Close" : "Link expense"}
                   </button>
                   <select
                     defaultValue=""
                     disabled={busy}
                     onChange={(e) => { if (e.target.value) resolve(t.id, e.target.value); }}
-                    className="border rounded px-1 py-1 w-28 shrink-0"
-                    title="Reduce this category's budget"
+                    className="w-32 shrink-0 rounded border px-1 py-1"
+                    title="Apply this reimbursement to a budget category"
                   >
-                    <option value="" disabled>Category…</option>
+                    <option value="" disabled>Choose budget…</option>
                     {categories.map((c) => <option key={c} value={c}>{prettifyCategory(c)}</option>)}
                   </select>
                   <button onClick={() => resolve(t.id, "TRANSFER_IN")} disabled={busy}
-                    title="Not a reimbursement — keep as a transfer"
-                    className="text-slate-500 hover:text-slate-700 shrink-0">Keep</button>
+                    title="Exclude this payment from spending and budget calculations"
+                    className="shrink-0 whitespace-nowrap text-slate-500 hover:text-slate-700">
+                    Not a reimbursement
+                  </button>
                 </div>
                 {linkingId === t.id && (
                   <ExpensePicker
@@ -144,29 +163,35 @@ export default function P2PReviewCard({
           <div className="space-y-2">
             <p className="text-xs font-medium text-slate-600">Sent — was it spending?</p>
             <p className="text-xs text-slate-500">
-              Money you sent people — was it really spending (rent share, dinner…)? Pick a
-              category to count it in your budget, or keep it as a plain transfer.
+              Choose a category if this was spending, or mark it as not spending so it stays
+              out of spending totals.
             </p>
             {outgoing.map((t) => (
-              <div key={t.id} className="flex items-center gap-2 text-xs border border-slate-100 rounded-lg px-2 py-1.5">
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-slate-700">{t.name}</div>
-                  <div className="text-slate-400">{formatDateFull(t.date)} · {formatCurrency(t.amount)}</div>
+              <div key={t.id} className="rounded-lg border border-slate-100 px-2 py-1.5 text-xs">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-slate-700">{t.name}</div>
+                    <div className="text-slate-400">{formatDateFull(t.date)} · {formatCurrency(t.amount)}</div>
+                  </div>
                 </div>
-                <select
-                  defaultValue=""
-                  disabled={busy}
-                  onChange={(e) => { if (e.target.value) resolve(t.id, e.target.value); }}
-                  className="border rounded px-1 py-1 w-36 shrink-0"
-                >
-                  <option value="" disabled>Category…</option>
-                  {categories.map((c) => (
-                    <option key={c} value={c}>{prettifyCategory(c)}</option>
-                  ))}
-                </select>
-                <button onClick={() => resolve(t.id, "TRANSFER_OUT")} disabled={busy}
-                  title="Not spending — keep as a transfer"
-                  className="text-slate-500 hover:text-slate-700 shrink-0">Keep</button>
+                <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                  <select
+                    defaultValue=""
+                    disabled={busy}
+                    onChange={(e) => { if (e.target.value) resolve(t.id, e.target.value); }}
+                    className="w-40 shrink-0 rounded border px-1 py-1"
+                  >
+                    <option value="" disabled>Choose category…</option>
+                    {categories.map((c) => (
+                      <option key={c} value={c}>{prettifyCategory(c)}</option>
+                    ))}
+                  </select>
+                  <button onClick={() => resolve(t.id, "TRANSFER_OUT")} disabled={busy}
+                    title="Exclude this payment from spending and budget calculations"
+                    className="shrink-0 whitespace-nowrap text-slate-500 hover:text-slate-700">
+                    Not spending
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -176,7 +201,7 @@ export default function P2PReviewCard({
       <div className="px-4 py-2 border-t border-slate-200 text-right">
         <button onClick={keepAll} disabled={busy}
           className="text-xs text-slate-500 hover:text-slate-700">
-          {busy ? "Saving…" : "Keep all as transfers"}
+          {busy ? "Saving…" : "Mark all reviewed — no spending changes"}
         </button>
       </div>
     </div>

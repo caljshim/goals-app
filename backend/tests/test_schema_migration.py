@@ -1,10 +1,10 @@
 from datetime import date
 
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 from sqlmodel.pool import StaticPool
 
 from app.budget.db import ensure_schema
-from app.budget.models import Transaction
+from app.budget.models import Budget, Goal, Transaction
 
 
 def test_transaction_stores_reimburses_link():
@@ -59,3 +59,19 @@ def test_ensure_schema_is_idempotent(tmp_path):
     SQLModel.metadata.create_all(eng)  # already has the column
     ensure_schema(eng)
     ensure_schema(eng)  # second run must not raise
+
+
+def test_spending_goals_migrate_to_period_budgets_and_archive():
+    eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(eng)
+    with Session(eng) as session:
+        goal = Goal(name="Dining", kind="spend_cap", target=100, category="EATING_OUT", period="weekly")
+        session.add(goal); session.commit(); session.refresh(goal)
+
+    ensure_schema(eng)
+
+    with Session(eng) as session:
+        budget = session.exec(select(Budget)).one()
+        migrated_goal = session.exec(select(Goal)).one()
+        assert (budget.category, budget.monthly_limit, budget.period) == ("EATING_OUT", 100, "weekly")
+        assert migrated_goal.archived_at is not None

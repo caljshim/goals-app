@@ -14,3 +14,14 @@ def test_list_accounts(client, session):
     assert len(data) == 1
     assert data[0]["name"] == "Checking"
     assert data[0]["current_balance"] == 250.0
+
+
+def test_manual_account_is_created_once(client):
+    first = client.post("/api/accounts/manual")
+    second = client.post("/api/accounts/manual")
+
+    assert first.status_code == 200
+    assert first.json()["name"] == "Manual finances"
+    assert first.json()["subtype"] == "manual"
+    assert second.status_code == 200
+    assert second.json()["id"] == first.json()["id"]

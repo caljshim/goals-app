@@ -28,13 +28,16 @@ def get_client() -> plaid_api.PlaidApi:
 
 def create_link_token(client) -> str:
     s = get_settings()
-    req = LinkTokenCreateRequest(
+    kwargs = dict(
         user=LinkTokenCreateRequestUser(client_user_id="local-user"),
         client_name="Finance Tracker",
         products=[Products(p) for p in s.plaid_products.split(",")],
         country_codes=[CountryCode(c) for c in s.plaid_country_codes.split(",")],
         language="en",
     )
+    if s.plaid_redirect_uri:
+        kwargs["redirect_uri"] = s.plaid_redirect_uri
+    req = LinkTokenCreateRequest(**kwargs)
     return client.link_token_create(req).link_token
 
 

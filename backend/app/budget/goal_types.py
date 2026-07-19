@@ -5,7 +5,7 @@ Goal row plus a GoalContext (live account balances and this month's category spe
 Adding a new goal type = add a GoalType subclass and register it — no edits to
 callers or a growing conditional."""
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 
 from app.budget.models import Goal
@@ -71,10 +71,19 @@ class GoalContext:
     account_names: dict[int, str]
     category_spend_by_period: dict[str, dict[str, float]]
     today: date
+    financial_values: dict[int, float] = field(default_factory=dict)
+    financial_labels: dict[int, str] = field(default_factory=dict)
 
 
 def _pct(current: float, target: float | None) -> float | None:
     return round(current / target * 100, 1) if target else None
+
+
+def _under_pct(current: float, target: float | None, anchor: float | None) -> float | None:
+    """Progress from a required starting value down to a lower target."""
+    if target is None or anchor is None or anchor <= target:
+        return None
+    return round(max(0.0, (anchor - current) / (anchor - target) * 100), 1)
 
 
 def _manual_current(goal: Goal, ctx: GoalContext) -> float:
@@ -83,7 +92,10 @@ def _manual_current(goal: Goal, ctx: GoalContext) -> float:
     and it reads 0 until the next contribution resets it — see services.goals)."""
     if goal.period in (None, "once"):
         return goal.current or 0.0
-    start = goal_period_start(goal)
+    # Production keeps exact reset-time behavior. Tests and historical contexts
+    # can supply a different date and should not silently use the machine's today.
+    effective_now = None if ctx.today == date.today() else datetime.combine(ctx.today, time(12))
+    start = goal_period_start(goal, effective_now)
     return (goal.current or 0.0) if goal.period_anchor == start else 0.0
 
 
@@ -134,11 +146,37 @@ class NumericGoalType(GoalType):
     def progress(self, goal, ctx):
         current = _manual_current(goal, ctx)
         if goal.direction == "under":
-            status = "over" if (goal.target and current > goal.target) else "under"
+            status = "reached" if (goal.target is not None and current <= goal.target) else "active"
+            pct = _under_pct(current, goal.target, goal.anchor_value)
         else:
             status = "reached" if (goal.target and current >= goal.target) else "active"
-        return {"current_value": round(current, 2), "pct": _pct(current, goal.target),
+            pct = _pct(current, goal.target)
+        return {"current_value": round(current, 2), "pct": pct,
                 "status": status, "unit": self.unit, "linked_label": None,
+                "days": None, "best_days": None}
+
+
+class FinancialGoalType(GoalType):
+    kind = "financial"
+    unit = "$"
+
+    def progress(self, goal, ctx):
+        current = (_manual_current(goal, ctx) if goal.financial_source == "manual"
+                   else ctx.financial_values.get(goal.id, 0.0))
+        rule = goal.financial_rule or "reach"
+        if rule == "stay_under":
+            status = "over" if (goal.target is not None and current > goal.target) else "under"
+            pct = _pct(current, goal.target)
+        elif rule == "reduce_to":
+            status = "reached" if (goal.target is not None and current <= goal.target) else "active"
+            pct = _under_pct(current, goal.target, goal.anchor_value)
+        else:
+            status = "reached" if (goal.target is not None and current >= goal.target) else "active"
+            pct = _pct(current, goal.target)
+        return {"current_value": round(current, 2), "pct": pct, "status": status,
+                "unit": self.unit,
+                "linked_label": ("Manual" if goal.financial_source == "manual"
+                                 else ctx.financial_labels.get(goal.id)),
                 "days": None, "best_days": None}
 
 
@@ -156,7 +194,9 @@ class StreakGoalType(GoalType):
 
 
 GOAL_TYPES: dict[str, GoalType] = {
-    t.kind: t for t in (SaveGoalType(), SpendCapGoalType(), NumericGoalType(), StreakGoalType())
+    t.kind: t for t in (
+        SaveGoalType(), SpendCapGoalType(), NumericGoalType(), FinancialGoalType(), StreakGoalType()
+    )
 }
 
 
