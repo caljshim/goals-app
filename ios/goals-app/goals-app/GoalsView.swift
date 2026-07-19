@@ -1307,6 +1307,73 @@ struct WeeklyScheduleEditor: View {
     }
 }
 
+/// Compact color chooser shown as a popover anchored to a widget's gauge in
+/// focus mode. `nil` = Default (inherit / brand). Applies on tap.
+struct ColorPickerPopover: View {
+    let selected: String?
+    let onPick: (String?) -> Void
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 5)
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 12) {
+            cell(nil)
+            ForEach(Customization.colorCatalog, id: \.self) { cell($0) }
+        }
+        .padding()
+        .frame(minWidth: 240)
+        .presentationCompactAdaptation(.popover)
+    }
+
+    @ViewBuilder private func cell(_ token: String?) -> some View {
+        Button { onPick(token) } label: {
+            Circle()
+                .fill(token.map(Customization.color(for:)) ?? Color.secondary.opacity(0.25))
+                .frame(width: 34, height: 34)
+                .overlay { if token == nil { Image(systemName: "slash.circle").font(.caption) } }
+                .overlay(Circle().strokeBorder(Theme.brand, lineWidth: token == selected ? 3 : 0))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(token ?? "Default color")
+    }
+}
+
+/// Compact icon chooser shown as a popover anchored to a widget's icon in focus
+/// mode. `nil` = Default (derive from kind / group). Applies on tap.
+struct IconPickerPopover: View {
+    let selected: String?
+    let defaultIcon: String
+    let accent: Color
+    let onPick: (String?) -> Void
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 6)
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: columns, spacing: 12) {
+                cell(nil)
+                ForEach(Customization.iconCatalog, id: \.self) { cell($0) }
+            }
+            .padding()
+        }
+        .frame(minWidth: 280, minHeight: 240)
+        .presentationCompactAdaptation(.popover)
+    }
+
+    @ViewBuilder private func cell(_ token: String?) -> some View {
+        Button { onPick(token) } label: {
+            Image(systemName: token.map(Customization.symbol(for:)) ?? Customization.symbol(for: defaultIcon))
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(token == nil ? Color.secondary : accent)
+                .frame(width: 40, height: 40)
+                .background((token == nil ? Color.secondary : accent).opacity(0.13),
+                            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Theme.brand, lineWidth: token == selected ? 2 : 0))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(token ?? "Default icon")
+    }
+}
+
 /// Reusable appearance editor for a goal or a group. `nil` icon/color means
 /// "use the default / inherit"; the grids include an explicit Default swatch.
 struct IconColorPicker: View {
