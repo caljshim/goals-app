@@ -53,6 +53,9 @@ struct GoalCategory: Identifiable {
     func groupWidgetId(named groupName: String) -> String {
         "\(composerMode == .routine ? "routine" : "goal")-group:\(groupName)"
     }
+
+    var customIcon: String? { goals.first?.groupIcon }
+    var customColor: String? { goals.first?.groupColor }
 }
 
 /// Builds the goal categories shown on the Goals tab and available as dashboard
@@ -212,6 +215,7 @@ struct GoalCategoryWidget: View {
     @State private var addingToGroup = false
     @State private var renamingGroup = false
     @State private var renameDraft = ""
+    @State private var customizing = false
 
     init(category: GoalCategory) {
         self.category = category
@@ -242,6 +246,17 @@ struct GoalCategoryWidget: View {
         } message: {
             Text("Every goal in this card will move together under the new name.")
         }
+        .sheet(isPresented: $customizing) {
+            IconColorPicker(title: "Group appearance",
+                            defaultIcon: "tag",
+                            icon: category.customIcon, color: category.customColor) { icon, color in
+                Task {
+                    if let groupName = category.groupName {
+                        await store.setGroupAppearance(groupName, icon: icon, color: color)
+                    }
+                }
+            }.tint(Theme.brand)
+        }
     }
 
     private var categoryCard: some View {
@@ -252,6 +267,11 @@ struct GoalCategoryWidget: View {
                 }
                 Button { beginRename() } label: {
                     Label("Rename group", systemImage: "pencil")
+                }
+                if category.groupName != nil {
+                    Button { customizing = true } label: {
+                        Label("Customize group", systemImage: "paintpalette")
+                    }
                 }
                 Divider()
                 Button(role: .destructive) { endGroup() } label: {
@@ -265,7 +285,10 @@ struct GoalCategoryWidget: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption).foregroundStyle(.secondary)
-                    IconChip(symbol: category.icon, tint: category.id.hasSuffix("section:ongoing") ? Theme.honey : Theme.brand)
+                    IconChip(
+                        symbol: category.customIcon.map(Customization.symbol(for:)) ?? category.icon,
+                        tint: category.customColor.map(Customization.color(for:))
+                            ?? (category.id.hasSuffix("section:ongoing") ? Theme.honey : Theme.brand))
                     Text(category.name).font(.headline)
                     GoalCountBadge(count: category.goals.count)
                     Spacer()
@@ -278,6 +301,7 @@ struct GoalCategoryWidget: View {
                 if let aggregate = category.aggregate {
                     GaugeBar(
                         pct: aggregate,
+                        tint: category.customColor.map(Customization.color(for:)) ?? Theme.brand,
                         over: category.hasGoalOverLimit,
                         reverse: category.aggregateIsReversed
                     )
@@ -447,7 +471,8 @@ struct GoalRow: View {
                             .font(.caption).foregroundStyle(goal.weeklyScheduleLabel.isEmpty ? Theme.negative : .secondary)
                     }
                     if let pct = store.displayedPct(goal) {
-                        GaugeBar(pct: pct, over: goal.status == "over", height: 6, reverse: goal.direction == "under")
+                        GaugeBar(pct: pct, tint: Customization.color(for: goal.resolvedColor),
+                                 over: goal.status == "over", height: 6, reverse: goal.direction == "under")
                     }
                 }
                 .contentShape(Rectangle())
@@ -522,6 +547,7 @@ struct GoalDetailView: View {
     @State private var confirmingStreakReset = false
     @State private var editingTarget = false
     @State private var targetDraft = ""
+    @State private var customizing = false
 
     private var goal: Goal? { store.goals.first { $0.id == goalId } }
 
@@ -530,10 +556,13 @@ struct GoalDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(spacing: 10) {
-                        IconChip(symbol: goal.symbol, tint: goal.kind == "streak" ? Theme.honey : Theme.brand)
+                        IconChip(symbol: Customization.symbol(for: goal.resolvedIcon), tint: Customization.color(for: goal.resolvedColor))
                         Text(goal.name).font(.title3.weight(.bold))
                         Spacer()
                     }
+                    Button { customizing = true } label: {
+                        Label("Customize appearance", systemImage: "paintpalette")
+                    }.buttonStyle(.bordered).controlSize(.small)
                     HStack(alignment: .firstTextBaseline, spacing: 7) {
                         Text(goal.format(store.displayedValue(goal))).font(.heroNumber.monospacedDigit()).fitOneLine()
                         if let target = goal.target {
@@ -594,6 +623,13 @@ struct GoalDetailView: View {
             .presentationDragIndicator(.visible)
             .sheet(isPresented: $editingWeeklySchedule) {
                 WeeklyScheduleEditor(goal: goal).environmentObject(store).tint(Theme.brand)
+            }
+            .sheet(isPresented: $customizing) {
+                IconColorPicker(title: "Goal appearance",
+                                defaultIcon: goal.resolvedIcon,
+                                icon: goal.icon, color: goal.color) { icon, color in
+                    Task { await store.setGoalAppearance(goal, icon: icon, color: color) }
+                }.tint(Theme.brand)
             }
             .confirmationDialog(
                 "Reset \(goal.name)?",

@@ -411,6 +411,23 @@ struct ChatBody: Encodable { let messages: [ChatMessage] }
             goalCelebration = nil
         } catch { show(error) }
     }
+    func setGoalAppearance(_ goal: Goal, icon: String?, color: String?) async {
+        do {
+            let updated: Goal = try await api.request(
+                "goals/\(goal.id)", method: "PATCH",
+                body: .init(GoalAppearanceBody(icon: icon, color: color)))
+            replaceGoal(updated)
+        } catch { show(error) }
+    }
+
+    func setGroupAppearance(_ name: String, icon: String?, color: String?) async {
+        do {
+            let _: GroupSettings = try await api.request(
+                "goal-groups/\(name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name)/customization",
+                method: "PUT", body: .init(GroupAppearanceBody(icon: icon, color: color)))
+            await loadGoals()  // refetch so the cascade (group_color -> members) is reflected
+        } catch { show(error) }
+    }
     func setGoalWeeklyDays(_ goal: Goal, days: [String]) async {
         do {
             let updated: Goal = try await api.request(
