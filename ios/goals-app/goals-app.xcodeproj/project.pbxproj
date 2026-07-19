@@ -12,6 +12,7 @@
 		A20000010000000000000001 /* GoalsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000020000000000000002 /* GoalsView.swift */; };
 		A30000010000000000000001 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30000020000000000000002 /* Theme.swift */; };
 		A40000010000000000000001 /* LocalUIState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000020000000000000002 /* LocalUIState.swift */; };
+		A50000010000000000000001 /* Customization.swift in Sources */ = {isa = PBXBuildFile; fileRef = A50000020000000000000002 /* Customization.swift */; };
 		95D24B8D300C910F008A3F53 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 95D24B8C300C910F008A3F53 /* Assets.xcassets */; };
 		95D24B90300C910F008A3F53 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 95D24B8F300C910F008A3F53 /* Preview Assets.xcassets */; };
 		95D24B9A300C910F008A3F53 /* goals_appTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95D24B99300C910F008A3F53 /* goals_appTests.swift */; };
@@ -44,6 +45,7 @@
 		A20000020000000000000002 /* GoalsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoalsView.swift; sourceTree = "<group>"; };
 		A30000020000000000000002 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		A40000020000000000000002 /* LocalUIState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalUIState.swift; sourceTree = "<group>"; };
+		A50000020000000000000002 /* Customization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Customization.swift; sourceTree = "<group>"; };
 		95D24B8C300C910F008A3F53 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		95D24B8F300C910F008A3F53 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		95D24B95300C910F008A3F53 /* goals-appTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "goals-appTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -107,6 +109,7 @@
 				A20000020000000000000002 /* GoalsView.swift */,
 				A30000020000000000000002 /* Theme.swift */,
 				A40000020000000000000002 /* LocalUIState.swift */,
+				A50000020000000000000002 /* Customization.swift */,
 				95D24B8C300C910F008A3F53 /* Assets.xcassets */,
 				95D24B8E300C910F008A3F53 /* Preview Content */,
 			);
@@ -278,6 +281,7 @@
 				A20000010000000000000001 /* GoalsView.swift in Sources */,
 				A30000010000000000000001 /* Theme.swift in Sources */,
 				A40000010000000000000001 /* LocalUIState.swift in Sources */,
+				A50000010000000000000001 /* Customization.swift in Sources */,
 				95D24B89300C910E008A3F53 /* goals_appApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -67,6 +67,9 @@ struct Goal: Codable, Identifiable {
     let currentValue: Double; let pct: Double?; let status, unit: String; let linkedLabel: String?
     let days, bestDays: Int?; let history, milestones: [HistoryPoint]
     let archivedAt: String?
+    let icon, color: String?
+    let resolvedIcon, resolvedColor: String
+    let groupIcon, groupColor: String?
 }
 struct GoalTask: Codable, Identifiable {
     var id: String { "\(goalId)-\(scheduledFor)" }
@@ -149,6 +152,29 @@ struct NewGoalBody: Encodable {
 struct WeeklyGoalUpdateBody: Encodable { let weeklyDays: [String] }
 struct GoalGroupUpdateBody: Encodable { let goalIds: [Int]; let name: String }
 struct GoalGroupEndBody: Encodable { let goalIds: [Int] }
+struct GoalAppearanceBody: Encodable {
+    let icon: String?
+    let color: String?
+    enum CodingKeys: String, CodingKey { case icon, color }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        if let icon { try c.encode(icon, forKey: .icon) } else { try c.encodeNil(forKey: .icon) }
+        if let color { try c.encode(color, forKey: .color) } else { try c.encodeNil(forKey: .color) }
+    }
+}
+
+struct GroupAppearanceBody: Encodable {
+    let icon: String?
+    let color: String?
+    enum CodingKeys: String, CodingKey { case icon, color }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        if let icon { try c.encode(icon, forKey: .icon) } else { try c.encodeNil(forKey: .icon) }
+        if let color { try c.encode(color, forKey: .color) } else { try c.encodeNil(forKey: .color) }
+    }
+}
+
+struct GroupSettings: Codable { let name: String; let icon, color: String? }
 struct CheckinBody: Encodable { let scheduledFor: String; let completed, allowOverdue: Bool }
 struct ChatBody: Encodable { let messages: [ChatMessage] }
 
