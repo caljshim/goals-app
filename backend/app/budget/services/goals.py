@@ -172,7 +172,19 @@ def build_context(session: Session) -> GoalContext:
     return GoalContext(balances, names, by_period, today, financial_values, financial_labels)
 
 
-def _base_fields(g: Goal, account_links: dict[int, list[int]] | None = None) -> dict:
+_KIND_ICON = {"save": "bank", "spend_cap": "card", "financial": "cashflow",
+              "numeric": "chart", "streak": "flame"}
+
+
+def _default_icon_token(g: Goal) -> str:
+    return _KIND_ICON.get(g.kind, "target")
+
+
+def _base_fields(g: Goal, account_links: dict[int, list[int]] | None = None,
+                 group_settings: dict[str, "GoalGroupSettings"] | None = None) -> dict:
+    gs = (group_settings or {}).get(g.group) if g.group else None
+    default_color = "honey" if g.kind == "streak" else "pine"
+    resolved_color = g.color or (gs.color if gs else None) or default_color
     return {
         "id": g.id, "name": g.name, "kind": g.kind, "target": g.target,
         "account_id": g.account_id, "category": g.category, "current": g.current,
@@ -187,13 +199,19 @@ def _base_fields(g: Goal, account_links: dict[int, list[int]] | None = None) -> 
         "reset_time": g.reset_time, "weekly_reset_day": g.weekly_reset_day,
         "monthly_reset_day": g.monthly_reset_day, "interval_days": g.interval_days,
         "archived_at": g.archived_at,
+        "icon": g.icon, "color": g.color,
+        "resolved_icon": g.icon or _default_icon_token(g),
+        "resolved_color": resolved_color,
+        "group_icon": (gs.icon if gs else None),
+        "group_color": (gs.color if gs else None),
     }
 
 
 def goal_to_read(session: Session, goal: Goal) -> dict:
     account_links = _goal_account_map(session)
     return {
-        **_base_fields(goal, account_links), **goal_progress(goal, build_context(session)),
+        **_base_fields(goal, account_links, _group_settings_map(session)),
+        **goal_progress(goal, build_context(session)),
         "history": _history_map(session).get(goal.id, []),
         "milestones": _milestone_map(session).get(goal.id, []),
     }
@@ -206,8 +224,9 @@ def list_with_progress(session: Session, archived: bool = False) -> list[dict]:
     history = _history_map(session)
     milestones = _milestone_map(session)
     account_links = _goal_account_map(session)
+    group_settings = _group_settings_map(session)
     return [
-        {**_base_fields(g, account_links), **goal_progress(g, ctx),
+        {**_base_fields(g, account_links, group_settings), **goal_progress(g, ctx),
          "history": history.get(g.id, []), "milestones": milestones.get(g.id, [])}
         for g in goals
     ]
@@ -412,7 +431,7 @@ def create_goal(session: Session, data: dict) -> Goal:
     return goal
 
 
-_EDITABLE = ("name", "target", "account_id", "category", "deadline", "group", "period", "weekly_day", "reset_time", "weekly_reset_day", "monthly_reset_day", "interval_days", "direction", "step", "financial_metric", "financial_rule", "financial_source")
+_EDITABLE = ("name", "target", "account_id", "category", "deadline", "group", "period", "weekly_day", "reset_time", "weekly_reset_day", "monthly_reset_day", "interval_days", "direction", "step", "financial_metric", "financial_rule", "financial_source", "icon", "color")
 
 
 def update_goal(session: Session, goal_id: int, data: dict) -> Goal | None:
@@ -429,6 +448,10 @@ def update_goal(session: Session, goal_id: int, data: dict) -> Goal | None:
         _require(data["financial_rule"] in _FINANCIAL_RULES, "unknown financial rule")
     if data.get("financial_source") is not None:
         _require(data["financial_source"] in _FINANCIAL_SOURCES, "unknown financial source")
+    if "icon" in data:
+        goal_customization.validate_icon(data["icon"])
+    if "color" in data:
+        goal_customization.validate_color(data["color"])
     if goal.kind == "financial":
         next_source = data.get("financial_source") or goal.financial_source or "accounts"
         next_metric = data.get("financial_metric") or goal.financial_metric or "account_balance"
@@ -574,17 +597,34 @@ def _active_goals_for_group_action(session: Session, goal_ids: list[int]) -> lis
     return goals
 
 
+def _active_group_count(session: Session, name: str) -> int:
+    return len(session.exec(
+        select(Goal).where(Goal.group == name, Goal.archived_at.is_(None))
+    ).all())
+
+
 def set_goal_group(session: Session, goal_ids: list[int], name: str) -> list[Goal]:
     clean_name = name.strip()
     _require(bool(clean_name), "group name is required")
     _require(len(clean_name) <= 80, "group name is too long")
     goals = _active_goals_for_group_action(session, goal_ids)
+    old_names = {g.group for g in goals if g.group and g.group != clean_name}
     for goal in goals:
         goal.group = clean_name
         session.add(goal)
     session.commit()
     for goal in goals:
         session.refresh(goal)
+    for old in old_names:
+        if _active_group_count(session, old) > 0:
+            continue
+        old_settings = session.get(GoalGroupSettings, old)
+        if old_settings is None:
+            continue
+        if session.get(GoalGroupSettings, clean_name) is None:
+            session.add(GoalGroupSettings(name=clean_name, icon=old_settings.icon, color=old_settings.color))
+        session.delete(old_settings)
+    session.commit()
     return goals
 
 
@@ -614,10 +654,17 @@ def set_group_settings(session: Session, name: str, icon: str | None, color: str
 
 def archive_goal_group(session: Session, goal_ids: list[int]) -> list[int]:
     goals = _active_goals_for_group_action(session, goal_ids)
+    affected = {g.group for g in goals if g.group}
     ended_at = datetime.utcnow()
     for goal in goals:
         goal.archived_at = ended_at
         session.add(goal)
+    session.commit()
+    for name in affected:
+        if _active_group_count(session, name) == 0:
+            settings = session.get(GoalGroupSettings, name)
+            if settings is not None:
+                session.delete(settings)
     session.commit()
     return [goal.id for goal in goals]
 

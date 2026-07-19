@@ -105,6 +105,10 @@ def ensure_schema(eng=engine) -> None:
             conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN financial_rule VARCHAR')
         if gcols and "financial_source" not in gcols:
             conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN financial_source VARCHAR')
+        if gcols and "icon" not in gcols:
+            conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN icon VARCHAR')
+        if gcols and "color" not in gcols:
+            conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN color VARCHAR')
 
         # Spending limits used to be represented as goals. Convert active rows to
         # budget rules, then archive them so their history remains recoverable.

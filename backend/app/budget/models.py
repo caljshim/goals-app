@@ -105,6 +105,8 @@ class Goal(SQLModel, table=True):
     direction: str = Field(default="reach")
     step: float = 1.0  # increment for the −/+ tally buttons on manual goals
     group: Optional[str] = Field(default=None, index=True)  # user-named group, e.g. "1000 CLUB"
+    icon: Optional[str] = None   # customization token; None -> derive from kind
+    color: Optional[str] = None  # customization token; None -> group cascade / default
     # Cadence: once | daily | weekly | monthly. period_anchor is the period-start date
     # the manual `current` value belongs to, so it auto-resets when the period rolls over.
     period: str = Field(default="once")

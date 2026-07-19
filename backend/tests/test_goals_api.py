@@ -307,3 +307,54 @@ def test_missing_goal_404(client, session):
     assert client.delete("/api/goals/999").status_code == 404
     assert client.patch("/api/goals/999", json={"target": 1}).status_code == 404
     assert client.post("/api/goals/999/reset").status_code == 404
+
+
+def test_goal_icon_color_patch_and_resolution(client, session):
+    gid = client.post("/api/goals", json={"name": "Reps", "kind": "numeric", "target": 100, "current": 10}).json()["id"]
+    # defaults before any customization
+    g = client.get("/api/goals").json()[0]
+    assert g["icon"] is None and g["color"] is None
+    assert g["resolved_icon"] == "chart" and g["resolved_color"] == "pine"
+
+    # unknown token rejected
+    assert client.patch(f"/api/goals/{gid}", json={"color": "bogus"}).status_code == 400
+
+    # set overrides
+    r = client.patch(f"/api/goals/{gid}", json={"icon": "flame", "color": "rose"})
+    assert r.status_code == 200 and r.json()["resolved_icon"] == "flame" and r.json()["resolved_color"] == "rose"
+
+    # clear color -> back to default
+    r = client.patch(f"/api/goals/{gid}", json={"color": None})
+    assert r.json()["color"] is None and r.json()["resolved_color"] == "pine"
+
+
+def test_streak_default_color_is_honey(client, session):
+    client.post("/api/goals", json={"name": "Meditate", "kind": "streak"})
+    g = client.get("/api/goals").json()[0]
+    assert g["resolved_icon"] == "flame" and g["resolved_color"] == "honey"
+
+
+def test_group_color_cascades_to_members(client, session):
+    a = client.post("/api/goals", json={"name": "A", "kind": "numeric", "target": 10, "current": 1, "group": "Trips"}).json()["id"]
+    b = client.post("/api/goals", json={"name": "B", "kind": "numeric", "target": 10, "current": 1, "group": "Trips"}).json()["id"]
+    client.put("/api/goal-groups/Trips/customization", json={"icon": "plane", "color": "sky"})
+
+    goals = {g["id"]: g for g in client.get("/api/goals").json()}
+    # cascade: neither goal set its own color -> inherits group color
+    assert goals[a]["resolved_color"] == "sky" and goals[a]["group_color"] == "sky" and goals[a]["group_icon"] == "plane"
+    # per-goal override wins over the cascade
+    client.patch(f"/api/goals/{b}", json={"color": "rose"})
+    goals = {g["id"]: g for g in client.get("/api/goals").json()}
+    assert goals[b]["resolved_color"] == "rose" and goals[b]["group_color"] == "sky"
+
+
+def test_group_settings_follow_rename_and_end(client, session):
+    a = client.post("/api/goals", json={"name": "A", "kind": "numeric", "target": 10, "current": 1, "group": "Trips"}).json()["id"]
+    client.put("/api/goal-groups/Trips/customization", json={"color": "sky"})
+    # rename Trips -> Journeys carries the settings
+    client.patch("/api/goal-groups", json={"goal_ids": [a], "name": "Journeys"})
+    assert client.get("/api/goal-groups/Journeys/customization").json()["color"] == "sky"
+    assert client.get("/api/goal-groups/Trips/customization").json()["color"] is None
+    # ending the group deletes its settings
+    client.post("/api/goal-groups/end", json={"goal_ids": [a]})
+    assert client.get("/api/goal-groups/Journeys/customization").json()["color"] is None

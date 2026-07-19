@@ -61,6 +61,31 @@ def test_ensure_schema_is_idempotent(tmp_path):
     ensure_schema(eng)  # second run must not raise
 
 
+def test_ensure_schema_adds_goal_icon_color_columns(tmp_path):
+    db = tmp_path / "old_goals.db"
+    eng = create_engine(f"sqlite:///{db}")
+    # Pre-feature goal table: no icon/color columns.
+    with eng.begin() as conn:
+        conn.exec_driver_sql(
+            'CREATE TABLE "goal" ('
+            "id INTEGER PRIMARY KEY, name VARCHAR NOT NULL, kind VARCHAR NOT NULL, "
+            "target FLOAT, category VARCHAR, current FLOAT)"
+        )
+        conn.exec_driver_sql(
+            'INSERT INTO "goal" (name, kind, target) VALUES (\'Reps\', \'numeric\', 100)'
+        )
+    SQLModel.metadata.create_all(eng)  # builds budgetrule etc.; skips existing goal
+    ensure_schema(eng)
+    with eng.connect() as conn:
+        gcols = {r[1] for r in conn.exec_driver_sql('PRAGMA table_info("goal")')}
+        assert {"icon", "color"} <= gcols
+        row = conn.exec_driver_sql('SELECT name, icon, color FROM "goal"').one()
+        assert row[0] == "Reps" and row[1] is None and row[2] is None  # data preserved, new cols NULL
+        tables = {r[0] for r in conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "goalgroupsettings" in tables
+
+
 def test_spending_goals_migrate_to_period_budgets_and_archive():
     eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     SQLModel.metadata.create_all(eng)

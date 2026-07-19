@@ -132,6 +132,8 @@ class GoalUpdate(BaseModel):
     interval_days: Optional[int] = None
     direction: Optional[str] = None
     step: Optional[float] = None
+    icon: Optional[str] = None
+    color: Optional[str] = None
 
 
 class GoalGroupUpdate(BaseModel):
@@ -188,6 +190,12 @@ class GoalRead(BaseModel):
     name: str
     kind: str
     group: Optional[str] = None
+    icon: Optional[str] = None
+    color: Optional[str] = None
+    resolved_icon: str = "target"
+    resolved_color: str = "pine"
+    group_icon: Optional[str] = None
+    group_color: Optional[str] = None
     history: list[GoalHistoryRead] = []
     milestones: list[GoalHistoryRead] = []
     target: Optional[float] = None
