@@ -20,13 +20,15 @@ def health():
 
 
 # Budgeting domain (Plaid transactions, categories, budgets, dashboard).
-from app.budget.routers import accounts, budgets, dashboard, plaid, transactions
+from app.budget.routers import accounts, budgets, dashboard, goals, plaid, rules, transactions
 
 app.include_router(accounts.router)
 app.include_router(transactions.router)
 app.include_router(budgets.router)
 app.include_router(dashboard.router)
 app.include_router(plaid.router)
+app.include_router(rules.router)
+app.include_router(goals.router)
 
 # Investing domain (read-only tastytrade portfolio).
 from app.invest import portfolio

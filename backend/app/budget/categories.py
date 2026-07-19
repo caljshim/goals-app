@@ -36,8 +36,29 @@ SPENDING_CATEGORIES = frozenset({
 })
 
 
-def effective_category(txn: Transaction) -> str:
-    return txn.user_category or txn.category or UNCATEGORIZED
+def normalize_category(name: str | None) -> str:
+    """Canonical UPPER_SNAKE_CASE form of a category name."""
+    return "_".join((name or "").strip().upper().split())
+
+
+def merchant_key(txn: Transaction) -> str:
+    """Normalized merchant identity a rule keys on: Plaid's cleaned merchant_name when
+    present (so "SAFEWAY #1234" and "SAFEWAY #5678" collapse to one), else the raw name."""
+    return (txn.merchant_name or txn.name or "").strip().lower()
+
+
+def effective_category(txn: Transaction, rules: dict[str, str] | None = None) -> str:
+    """Resolved category, in precedence order:
+    user_category (one-off override) > merchant rule > raw Plaid category > UNCATEGORIZED.
+    Rules never apply to transfers/P2P (raw category TRANSFER_*/LOAN_*), keeping the
+    Zelle/card-payment handling untouched. `rules` maps merchant_key -> category."""
+    if txn.user_category:
+        return txn.user_category
+    if rules and txn.category not in TRANSFER_CATEGORIES:
+        rule = rules.get(merchant_key(txn))
+        if rule:
+            return rule
+    return txn.category or UNCATEGORIZED
 
 
 def is_transfer(txn: Transaction) -> bool:
@@ -53,6 +74,16 @@ _P2P_KEYWORDS = ("zelle", "venmo")
 
 def is_p2p(txn: Transaction) -> bool:
     if effective_category(txn) not in {"TRANSFER_IN", "TRANSFER_OUT"}:
+        return False
+    name = (txn.name or "").lower()
+    return any(k in name for k in _P2P_KEYWORDS)
+
+
+def is_incoming_p2p(txn: Transaction) -> bool:
+    """Money coming IN from a person via Zelle/Venmo — a candidate reimbursement.
+    Uses the raw Plaid category (not effective) so it stays detectable after the
+    user assigns it a spending category or keeps it as a transfer."""
+    if txn.category != "TRANSFER_IN":
         return False
     name = (txn.name or "").lower()
     return any(k in name for k in _P2P_KEYWORDS)

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { isTransferCategory } from "../categories";
-import { formatCurrency, prettifyCategory } from "../format";
+import { formatCurrency, formatDate, prettifyCategory } from "../format";
 import type { Transaction } from "../types";
 
 const NEW_CATEGORY = "__new__";
@@ -21,6 +21,7 @@ interface MerchantGroup {
   key: string;
   items: Transaction[];
   total: number;
+  latestDate: string; // most recent transaction date in the group (YYYY-MM-DD)
 }
 interface Group {
   category: string;
@@ -71,8 +72,10 @@ export default function CategoryTransactions({ onChange }: { onChange?: () => vo
             key,
             items: mItems,
             total: mItems.reduce((sum, t) => sum + t.amount, 0),
+            latestDate: mItems.reduce((max, t) => (t.date > max ? t.date : max), mItems[0].date),
           }))
-          .sort((a, b) => b.total - a.total);
+          // Newest first; fall back to amount when two rows share a date.
+          .sort((a, b) => b.latestDate.localeCompare(a.latestDate) || b.total - a.total);
         return {
           category,
           merchants,
@@ -92,10 +95,11 @@ export default function CategoryTransactions({ onChange }: { onChange?: () => vo
   const recategorize = async (ids: number[], value: string) => {
     const v = value.trim();
     setNewFor(null);
-    if (!v) return;
+    if (!v || ids.length === 0) return;
     try {
-      // Serial, not Promise.all: concurrent writes to SQLite can hit "database is locked".
-      for (const id of ids) await api.updateTransaction(id, v);
+      // Rule by default: these rows are one merchant, so make the category stick for
+      // all of that merchant's transactions (past & future) in a single call.
+      await api.setMerchantCategory(ids[0], v);
       load();
       onChange?.();
     } catch {
@@ -154,6 +158,9 @@ export default function CategoryTransactions({ onChange }: { onChange?: () => vo
                                 ×{mg.items.length}
                               </span>
                             )}
+                          </td>
+                          <td className="py-1 pr-2 text-slate-500 whitespace-nowrap">
+                            {formatDate(mg.latestDate)}
                           </td>
                           <td className="py-1 pr-2 w-52">
                             {newFor === rowKey ? (

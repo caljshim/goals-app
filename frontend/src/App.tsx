@@ -3,12 +3,11 @@ import { api } from "./api";
 import CopilotChat from "./components/CopilotChat";
 import P2PReviewCard from "./components/P2PReviewCard";
 import Portfolio from "./components/Portfolio";
-import Accounts from "./pages/Accounts";
-import Budgets from "./pages/Budgets";
 import Dashboard from "./pages/Dashboard";
-import Transactions from "./pages/Transactions";
+import Finances from "./pages/Finances";
+import Goals from "./pages/Goals";
 
-const TABS = ["Dashboard", "Transactions", "Accounts", "Budgets", "Invest"] as const;
+const TABS = ["Dashboard", "Finances", "Goals", "Invest"] as const;
 type Tab = (typeof TABS)[number];
 
 const SYNC_INTERVAL_MS = 15 * 60 * 1000;
@@ -90,9 +89,8 @@ export default function App() {
           {/* Remount the active page when the assistant changes data so it refetches. */}
           <div key={refreshKey}>
             {tab === "Dashboard" && <Dashboard />}
-            {tab === "Transactions" && <Transactions />}
-            {tab === "Accounts" && <Accounts />}
-            {tab === "Budgets" && <Budgets />}
+            {tab === "Finances" && <Finances />}
+            {tab === "Goals" && <Goals />}
             {tab === "Invest" && <Portfolio />}
           </div>
         </div>

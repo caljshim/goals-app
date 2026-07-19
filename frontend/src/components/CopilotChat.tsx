@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { applyDashboardUiActions, type DashboardUiAction } from "../dashboardConfig";
 import type { ChatMessage } from "../types";
 
 type Msg = ChatMessage & { actions?: string[] };
@@ -30,6 +31,7 @@ export default function CopilotChat({ onApplied }: { onApplied?: () => void }) {
     try {
       const res = await api.chat(history.map((m) => ({ role: m.role, content: m.content })));
       setMessages([...history, { role: "assistant", content: res.reply || "(no reply)", actions: res.actions }]);
+      if (res.ui_actions?.length) applyDashboardUiActions(res.ui_actions as DashboardUiAction[]);
       if (res.refresh) onApplied?.();
     } catch (e) {
       const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;

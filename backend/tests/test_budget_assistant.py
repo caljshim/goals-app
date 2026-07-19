@@ -148,6 +148,34 @@ def test_overview_spend_includes_p2p_net():
     assert data["avg_monthly_p2p_net"] == round((-90.0 + 30.0) / n, 2)
 
 
+def test_overview_reflects_reimbursements_in_categories():
+    # A linked reimbursement and a category-only reimbursement must reduce the
+    # category (matching the dashboard) — not count as income or mere p2p netting.
+    s = make_session()
+    months = assistant._prev_complete_months(assistant.AVG_MONTHS)  # [newest, middle, oldest]
+    newest, oldest = months[0], months[-1]
+    ny, nm = int(newest[:4]), int(newest[5:7])
+    oy, om = int(oldest[:4]), int(oldest[5:7])
+    # anchor on the 1st of the oldest window month so all AVG_MONTHS months are covered
+    s.add(Transaction(account_id=1, date=date(oy, om, 1), name="Anchor", amount=30.0, category="TRANSPORTATION"))
+    dinner = Transaction(account_id=1, date=date(ny, nm, 12), name="Group dinner",
+                         amount=180.0, category="FOOD_AND_DRINK")
+    s.add(dinner); s.commit(); s.refresh(dinner)
+    s.add(Transaction(account_id=1, date=date(ny, nm, 14), name="Zelle payment from Ryan",
+                      amount=-60.0, category="TRANSFER_IN", reimburses_transaction_id=dinner.id))
+    s.add(Transaction(account_id=1, date=date(ny, nm, 20), name="Zelle payment from Mom",
+                      amount=-40.0, category="TRANSFER_IN", user_category="FOOD_AND_DRINK"))
+    s.commit()
+
+    data, _ = assistant._overview(s)
+    n = data["months_averaged"]
+    assert n == assistant.AVG_MONTHS
+    food = next(c for c in data["avg_monthly_by_category"] if c["category"] == "FOOD_AND_DRINK")
+    assert food["avg_monthly"] == round((180.0 - 60.0 - 40.0) / n, 2)  # 80 net, not 180
+    assert data["avg_monthly_income"] == 0.0        # reimbursements are not income
+    assert data["avg_monthly_p2p_net"] == 0.0       # they reduce the category, not the net
+
+
 def test_add_category_persists():
     s = make_session()
     data, action = assistant._add_category(s, "gifts & donations")
@@ -156,6 +184,48 @@ def test_add_category_persists():
     # idempotent
     data2, _ = assistant._add_category(s, "GIFTS_&_DONATIONS")
     assert data2["created"] is False
+
+
+def test_rule_tools_registered():
+    names = {t["name"] for t in assistant.TOOLS}
+    assert {"set_merchant_rule", "list_merchant_rules", "bootstrap_rules"} <= names
+    assert {"set_merchant_rule", "list_merchant_rules", "bootstrap_rules"} <= set(assistant._HANDLERS)
+
+
+def test_set_merchant_rule_tool_creates_rule():
+    from app.budget.services import rules as rules_svc
+    s = make_session()
+    data, action = assistant._set_merchant_rule(s, "Safeway", "groceries")
+    assert data["merchant"] == "safeway" and data["category"] == "GROCERIES"
+    assert rules_svc.load_rules(s)["safeway"] == "GROCERIES"
+    assert action is not None
+
+
+def test_set_merchant_rule_tool_rejects_transfer_category():
+    s = make_session()
+    data, action = assistant._set_merchant_rule(s, "Safeway", "TRANSFER_OUT")
+    assert "error" in data and action is None
+
+
+def test_bootstrap_rules_tool_from_history():
+    from app.budget.services import rules as rules_svc
+    s = make_session()
+    s.add(Transaction(account_id=1, date=date(2026, 7, 1), name="Chipotle", merchant_name="Chipotle",
+                      amount=12.0, category="FOOD_AND_DRINK", user_category="EATING_OUT"))
+    s.add(Transaction(account_id=1, date=date(2026, 7, 2), name="Chipotle", merchant_name="Chipotle",
+                      amount=13.0, category="FOOD_AND_DRINK", user_category="EATING_OUT"))
+    s.commit()
+    data, action = assistant._bootstrap_rules(s)
+    assert data["count"] == 1
+    assert rules_svc.load_rules(s)["chipotle"] == "EATING_OUT"
+    assert action is not None
+
+
+def test_list_merchant_rules_tool():
+    s = make_session()
+    assistant._set_merchant_rule(s, "Safeway", "GROCERIES")
+    data, _ = assistant._list_merchant_rules(s)
+    assert data["count"] == 1 and data["rules"][0]["merchant"] == "safeway"
 
 
 class _FakeResp:
@@ -177,6 +247,29 @@ class _FakeMessages:
 class _FakeClient:
     def __init__(self, responses):
         self.messages = _FakeMessages(responses)
+
+
+def test_run_assistant_never_returns_empty_reply_after_action():
+    # The weak/cheap model sometimes ends a tool turn with no text. A blank reply must
+    # never surface — fall back to summarizing what was done.
+    s = make_session(); seed(s)
+    tool_block = SimpleNamespace(type="tool_use", id="tu_1", name="set_budget",
+                                 input={"category": "FOOD_AND_DRINK", "monthly_limit": 200})
+    client = _FakeClient([
+        _FakeResp("tool_use", [tool_block]),
+        _FakeResp("end_turn", [SimpleNamespace(type="text", text="")]),
+    ])
+    result = assistant.run_assistant(s, [{"role": "user", "content": "set food budget 200"}], client=client)
+    assert result["reply"].strip() != ""
+    assert "FOOD_AND_DRINK" in result["reply"]
+    assert result["refresh"] is True
+
+
+def test_run_assistant_empty_reply_without_action_has_fallback():
+    s = make_session()
+    client = _FakeClient([_FakeResp("end_turn", [SimpleNamespace(type="text", text="   ")])])
+    result = assistant.run_assistant(s, [{"role": "user", "content": "??"}], client=client)
+    assert result["reply"].strip() != ""
 
 
 def test_run_assistant_applies_tool_then_replies():

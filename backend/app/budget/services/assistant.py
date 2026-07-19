@@ -10,9 +10,11 @@ from datetime import date
 import anthropic
 from sqlmodel import Session, select
 
-from app.budget.categories import effective_category, is_p2p, is_transfer
+from app.budget.categories import effective_category, is_incoming_p2p, is_p2p, is_transfer
 from app.config import get_settings
 from app.budget.models import Budget, Category, Transaction
+from app.budget.services import rules as rules_svc
+from app.budget.services.rules import load_rules
 from app.budget.services.summary import data_covered_months
 
 MAX_TOOL_ITERATIONS = 6
@@ -38,8 +40,10 @@ SYSTEM = (
     "set_budget / delete_budget whenever the user's intent is clear — no confirmation needed. "
     "Always summarize what you changed. Budget the categories the user actually spends in, and "
     "keep total budgeted spending at or below average monthly income so there is room to save.\n"
-    "- For cleaning up categories, inspect with list_transactions and apply changes with "
-    "recategorize directly (mapping to known_categories), then summarize what you changed.\n"
+    "- To fix categorization efficiently, prefer set_merchant_rule — it makes a category stick "
+    "for a whole merchant (past AND future), so the user isn't re-fixing it every sync. Use "
+    "bootstrap_rules once to convert their existing categorizations into rules. Use recategorize "
+    "only for a genuine one-off exception on a single transaction. Map to known_categories.\n"
     "- To introduce a genuinely new bucket the user wants, use add_category; recategorize and "
     "set_budget also register any new category automatically. Categories persist.\n"
     "- Be concise. Use short paragraphs or compact lists. Show amounts like $1,234."
@@ -87,19 +91,47 @@ def _overview(session: Session) -> tuple[dict, None]:
     income_total = 0.0
     p2p_net = 0.0
     in_use: set[str] = set()
-    for t in session.exec(select(Transaction)).all():
+    # Linked reimbursements reduce the expense they point at (capped at its amount),
+    # in that expense's month — mirror of services.summary so the copilot's numbers
+    # match the dashboard.
+    txns = session.exec(select(Transaction)).all()
+    rules = load_rules(session)
+    by_id = {t.id: t for t in txns}
+    reimbursed: dict[int, float] = {}
+    for t in txns:
+        target = by_id.get(t.reimburses_transaction_id) if t.reimburses_transaction_id else None
+        if target is not None and target.amount > 0:
+            reimbursed[target.id] = reimbursed.get(target.id, 0.0) + -t.amount
+
+    for t in txns:
+        in_window = _month_key(t.date) in months
+        # Linked reimbursement: folded into its target expense below.
+        if t.reimburses_transaction_id is not None:
+            continue
+        # Incoming Zelle/Venmo (money in): a reimbursement or a plain transfer.
+        if is_incoming_p2p(t):
+            cat = effective_category(t)
+            if cat == "TRANSFER_IN":
+                if in_window:      # kept as a transfer / unreviewed — net the total
+                    p2p_net += t.amount
+            else:
+                in_use.add(cat)
+                if in_window:      # assigned to a category — reduce that category
+                    spend[cat] = spend.get(cat, 0.0) + t.amount
+            continue
         if is_transfer(t):
-            # Zelle/Venmo with real people: incoming (−) reimburses spending,
-            # outgoing (+) is real spending. Affects totals only, not categories.
-            if is_p2p(t) and _month_key(t.date) in months:
+            # Outgoing Zelle/Venmo kept as a transfer nets the total; other transfers
+            # (card payments, own-account moves) stay excluded.
+            if is_p2p(t) and in_window:
                 p2p_net += t.amount
             continue
-        ec = effective_category(t)
+        ec = effective_category(t, rules)
         in_use.add(ec)
-        if _month_key(t.date) not in months:
+        if not in_window:
             continue
         if t.amount >= 0:
-            spend[ec] = spend.get(ec, 0.0) + t.amount
+            net = t.amount - min(reimbursed.get(t.id, 0.0), t.amount)
+            spend[ec] = spend.get(ec, 0.0) + net
         else:
             income_total += -t.amount
     by_category = sorted(
@@ -127,11 +159,12 @@ def _list_transactions(session: Session, month=None, category=None, limit=50) ->
     rows = session.exec(
         select(Transaction).order_by(Transaction.date.desc(), Transaction.id.desc())
     ).all()
+    rules = load_rules(session)
     out = []
     for t in rows:
         if is_transfer(t):
             continue
-        ec = effective_category(t)
+        ec = effective_category(t, rules)
         if (month and _month_key(t.date) != month) or (cat and ec != cat):
             continue
         out.append({
@@ -193,6 +226,28 @@ def _add_category(session: Session, name) -> tuple[dict, str | None]:
     session.add(Category(name=cat))
     session.commit()
     return {"category": cat, "created": True}, f"Added category {cat}"
+
+
+def _set_merchant_rule(session: Session, merchant, category) -> tuple[dict, str | None]:
+    try:
+        rule = rules_svc.set_merchant_rule(session, merchant or "", category or "")
+    except ValueError as exc:
+        return {"error": str(exc)}, None
+    return (
+        {"merchant": rule.merchant, "category": rule.category},
+        f"Rule: {rule.merchant} → {rule.category}",
+    )
+
+
+def _list_merchant_rules(session: Session) -> tuple[dict, None]:
+    rules = rules_svc.list_rules(session)
+    return {"rules": rules, "count": len(rules)}, None
+
+
+def _bootstrap_rules(session: Session) -> tuple[dict, str | None]:
+    out = rules_svc.bootstrap_rules(session)
+    action = f"Created {out['count']} merchant rule(s) from history" if out["count"] else None
+    return out, action
 
 
 def _set_budget(session: Session, category, monthly_limit) -> tuple[dict, str | None]:
@@ -258,6 +313,38 @@ TOOLS = [
         },
     },
     {
+        "name": "set_merchant_rule",
+        "description": (
+            "Create/update a MERCHANT rule so a category sticks for ALL of a merchant's past & "
+            "future transactions — the efficient way to fix categories (prefer this over "
+            "recategorize for a merchant that recurs). merchant is matched case-insensitively on "
+            "the cleaned merchant name. Clears any one-off overrides on that merchant. Cannot map "
+            "to a transfer category. Use recategorize only for a genuine one-off exception."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "merchant": {"type": "string", "description": "Merchant name, e.g. Safeway"},
+                "category": {"type": "string", "description": "UPPER_SNAKE_CASE custom category"},
+            },
+            "required": ["merchant", "category"],
+        },
+    },
+    {
+        "name": "list_merchant_rules",
+        "description": "List existing merchant→category rules.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "bootstrap_rules",
+        "description": (
+            "Scan transaction history and create merchant rules from the user's existing "
+            "categorizations (majority category per merchant). Run once to convert past manual "
+            "recategorizations into rules that apply going forward. Summarize what was created."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "set_budget",
         "description": (
             "Create or update a monthly budget limit for a category (UPPER_SNAKE_CASE). Apply "
@@ -299,6 +386,9 @@ _HANDLERS = {
     "get_overview": lambda s, i: _overview(s),
     "list_transactions": lambda s, i: _list_transactions(s, i.get("month"), i.get("category"), i.get("limit", 50)),
     "recategorize": lambda s, i: _recategorize(s, i.get("transaction_ids", []), i.get("category", "")),
+    "set_merchant_rule": lambda s, i: _set_merchant_rule(s, i.get("merchant", ""), i.get("category", "")),
+    "list_merchant_rules": lambda s, i: _list_merchant_rules(s),
+    "bootstrap_rules": lambda s, i: _bootstrap_rules(s),
     "set_budget": lambda s, i: _set_budget(s, i.get("category", ""), i.get("monthly_limit")),
     "delete_budget": lambda s, i: _delete_budget(s, i.get("category", "")),
     "add_category": lambda s, i: _add_category(s, i.get("name", "")),
@@ -334,6 +424,12 @@ def run_assistant(session: Session, messages: list[dict], client=None) -> dict:
         )
         if resp.stop_reason != "tool_use":
             text = "".join(b.text for b in resp.content if b.type == "text").strip()
+            if not text:
+                # The weak/cheap model sometimes ends a tool turn with no text, or the
+                # reply is cut off by max_tokens. Never surface a blank reply.
+                text = ("Done — " + "; ".join(actions)) if actions else (
+                    "I wasn't able to put that into words — could you rephrase or narrow it down?"
+                )
             return {"reply": text, "actions": actions, "refresh": bool(actions)}
 
         convo.append({"role": "assistant", "content": resp.content})

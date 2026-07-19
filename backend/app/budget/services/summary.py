@@ -3,8 +3,9 @@ from datetime import date
 
 from sqlmodel import Session, select
 
-from app.budget.categories import effective_category, is_p2p, is_transfer
+from app.budget.categories import effective_category, is_incoming_p2p, is_p2p, is_transfer
 from app.budget.models import Budget, Transaction
+from app.budget.services.rules import load_rules
 
 
 def _month_key(d) -> str:
@@ -33,34 +34,98 @@ def _prev_months(month: str, n: int) -> list[str]:
     return list(reversed(out))
 
 
+def spend_by_category_in_range(session: Session, start, end) -> dict[str, float]:
+    """Reimbursement/rule-aware spend per category over an inclusive [start, end] date
+    range — the same accounting as build_summary's monthly spend, for any window
+    (used by period-scoped spend-cap goals)."""
+    txns = session.exec(select(Transaction)).all()
+    rules = load_rules(session)
+    by_id = {t.id: t for t in txns}
+    reimbursed = defaultdict(float)
+    for t in txns:
+        target = by_id.get(t.reimburses_transaction_id) if t.reimburses_transaction_id else None
+        if target is not None and target.amount > 0:
+            reimbursed[target.id] += -t.amount
+
+    spend = defaultdict(float)
+    for t in txns:
+        if not (start <= t.date <= end):
+            continue
+        if t.reimburses_transaction_id is not None:
+            continue  # folded into the target expense
+        if is_incoming_p2p(t):
+            cat = effective_category(t, rules)
+            if cat != "TRANSFER_IN":          # category-only reimbursement reduces its category
+                spend[cat] += t.amount
+            continue
+        if is_transfer(t):
+            continue
+        if t.amount >= 0:
+            net = t.amount - min(reimbursed.get(t.id, 0.0), t.amount)
+            spend[effective_category(t, rules)] += net
+    return {c: round(v, 2) for c, v in spend.items()}
+
+
 def build_summary(session: Session, month: str) -> dict:
     txns = session.exec(select(Transaction)).all()
+    rules = load_rules(session)
 
     spend = defaultdict(float)
     income_total = 0.0
     expense_total = 0.0
     trend = {m: {"income": 0.0, "expense": 0.0} for m in _prev_months(month, 6)}
 
+    # A linked incoming Zelle reimburses the expense it points at. Sum those
+    # reimbursements per expense up front (capped later at the expense amount) so the
+    # expense's own row nets them out — which lands the credit in the *expense's*
+    # month and category, regardless of when the Zelle arrived.
+    by_id = {t.id: t for t in txns}
+    reimbursed = defaultdict(float)
     for t in txns:
+        target = by_id.get(t.reimburses_transaction_id) if t.reimburses_transaction_id else None
+        if target is not None and target.amount > 0:
+            reimbursed[target.id] += -t.amount  # incoming amounts are negative
+
+    for t in txns:
+        mk = _month_key(t.date)
+        # Linked reimbursement: its effect is folded into the target expense below.
+        if t.reimburses_transaction_id is not None:
+            continue
+        # Incoming Zelle/Venmo (money in): a reimbursement or a plain transfer.
+        if is_incoming_p2p(t):
+            cat = effective_category(t)
+            if cat == "TRANSFER_IN":
+                # Not yet reviewed, or kept as a transfer — net the global total only.
+                if mk == month:
+                    expense_total += t.amount
+                if mk in trend:
+                    trend[mk]["expense"] += t.amount
+            else:
+                # Assigned to a spending category — reduce that category this month.
+                if mk == month:
+                    spend[cat] += t.amount
+                    expense_total += t.amount
+                if mk in trend:
+                    trend[mk]["expense"] += t.amount
+            continue
         if is_transfer(t):
-            # Zelle/Venmo with real people changes true spending: incoming (−) is a
-            # reimbursement, outgoing (+) is paying your share. Totals only — never
-            # attributed to a category. Other transfers (card payments, own-account
-            # moves) stay fully excluded.
+            # Outgoing Zelle/Venmo kept as a transfer nets the total (incoming handled
+            # above); other transfers (card payments, own-account moves) stay excluded.
             if is_p2p(t):
-                mk = _month_key(t.date)
                 if mk == month:
                     expense_total += t.amount
                 if mk in trend:
                     trend[mk]["expense"] += t.amount
             continue
-        mk = _month_key(t.date)
         if t.amount >= 0:
+            # Real expense — subtract any reimbursements pointed at it (capped so the
+            # expense never nets below zero).
+            net = t.amount - min(reimbursed.get(t.id, 0.0), t.amount)
             if mk == month:
-                spend[effective_category(t)] += t.amount
-                expense_total += t.amount
+                spend[effective_category(t, rules)] += net
+                expense_total += net
             if mk in trend:
-                trend[mk]["expense"] += t.amount
+                trend[mk]["expense"] += net
         else:
             if mk == month:
                 income_total += -t.amount

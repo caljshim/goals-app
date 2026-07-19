@@ -1,29 +1,57 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { api } from "../api";
-import { formatCurrency } from "../format";
+import ExpensePicker from "../components/ExpensePicker";
+import MerchantRules from "../components/MerchantRules";
+import { formatCurrency, formatDateFull, prettifyCategory } from "../format";
+import { filterTransactions } from "../search";
+import { isIncomingZelle } from "../zelle";
 import type { Account, Transaction } from "../types";
 
 export default function Transactions() {
   const [rows, setRows] = useState<Transaction[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [category, setCategory] = useState("");
+  const [query, setQuery] = useState("");
   const [form, setForm] = useState({ account_id: 0, date: "", name: "", amount: "" });
   const [error, setError] = useState<string | null>(null);
+  const [linkingId, setLinkingId] = useState<number | null>(null);
+  const [drafts, setDrafts] = useState<Record<number, string>>({});
+  const [rulesSignal, setRulesSignal] = useState(0);
 
+  // Load once; search filters client-side (no per-keystroke API calls).
   const load = () => {
-    const params: Record<string, string> = {};
-    if (category) params.category = category;
-    api.getTransactions(params)
+    api.getTransactions()
       .then(setRows)
       .catch(() => setError("Failed to load transactions. Please try again."));
   };
   useEffect(() => { api.getAccounts().then(setAccounts); }, []);
-  useEffect(() => { load(); }, [category]);
+  useEffect(() => { load(); }, []);
 
-  const recategorize = async (id: number, value: string) => {
+  const visible = filterTransactions(rows, query);
+
+  const draftFor = (t: Transaction) => drafts[t.id] ?? t.effective_category;
+  const setDraft = (id: number, v: string) => setDrafts((d) => ({ ...d, [id]: v }));
+  const clearDraft = (id: number) =>
+    setDrafts((d) => { const n = { ...d }; delete n[id]; return n; });
+
+  // Rule by default: make the category stick for the whole merchant (past & future).
+  const applyRule = async (t: Transaction) => {
+    const v = draftFor(t).trim();
+    if (!v || v === t.effective_category) { clearDraft(t.id); return; }
     try {
-      await api.updateTransaction(id, value || null);
-      load();
+      await api.setMerchantCategory(t.id, v);
+      clearDraft(t.id); load(); setRulesSignal((s) => s + 1);
+    } catch {
+      setError("Failed to apply category rule. Please try again.");
+    }
+  };
+
+  // One-off exception on just this transaction (overrides its merchant rule).
+  const applyOneOff = async (t: Transaction) => {
+    const v = draftFor(t).trim();
+    if (!v) return;
+    try {
+      await api.updateTransaction(t.id, v);
+      clearDraft(t.id); load();
     } catch {
       setError("Failed to update category. Please try again.");
     }
@@ -52,6 +80,25 @@ export default function Transactions() {
     }
   };
 
+  const unlinkReimbursement = async (id: number) => {
+    try {
+      await api.linkReimbursement(id, null);
+      load();
+    } catch {
+      setError("Failed to unlink reimbursement. Please try again.");
+    }
+  };
+
+  const linkReimbursement = async (id: number, targetId: number) => {
+    try {
+      await api.linkReimbursement(id, targetId);
+      setLinkingId(null);
+      load();
+    } catch {
+      setError("Failed to link reimbursement. Please try again.");
+    }
+  };
+
   return (
     <div>
       {error && (
@@ -76,8 +123,18 @@ export default function Transactions() {
         <button className="px-3 py-1 rounded bg-slate-900 text-white text-sm">Add</button>
       </form>
 
-      <input placeholder="Filter by category (e.g. GROCERIES)" value={category}
-        onChange={(e) => setCategory(e.target.value)} className="border rounded px-2 py-1 mb-3 w-72" />
+      <MerchantRules signal={rulesSignal} onChange={load} />
+
+      <div className="flex items-center gap-2 mb-3">
+        <input placeholder="Search merchant, description, or category…" value={query}
+          onChange={(e) => setQuery(e.target.value)} className="border rounded px-2 py-1 w-80" />
+        {query && (
+          <span className="text-xs text-slate-500">
+            {visible.length} of {rows.length}
+            <button onClick={() => setQuery("")} className="ml-2 text-slate-400 hover:text-slate-600">clear</button>
+          </span>
+        )}
+      </div>
 
       <table className="w-full text-sm bg-white rounded-xl border border-slate-200 overflow-hidden">
         <thead className="bg-slate-100 text-left">
@@ -85,26 +142,89 @@ export default function Transactions() {
           <th className="p-2 text-right">Amount</th><th className="p-2"></th></tr>
         </thead>
         <tbody>
-          {rows.map((t) => (
-            <tr key={t.id} className="border-t border-slate-100">
-              <td className="p-2">{t.date}</td>
-              <td className="p-2">{t.merchant_name ?? t.name}</td>
-              <td className="p-2">
-                <input defaultValue={t.effective_category} onBlur={(e) => recategorize(t.id, e.currentTarget.value)}
-                  className="border rounded px-1 py-0.5 w-40" title="Edit to recategorize" />
-              </td>
-              <td className={`p-2 text-right ${t.amount < 0 ? "text-emerald-600" : ""}`}>
-                {formatCurrency(t.amount)}
-              </td>
-              <td className="p-2 text-right">
-                {t.is_manual && (
-                  <button onClick={() => removeTransaction(t.id)}
-                    className="text-red-500 text-xs">Delete</button>
+          {visible.map((t) => {
+            const linked = t.reimburses_transaction_id !== null;
+            const showReimburse = isIncomingZelle(t) || linked;
+            return (
+              <Fragment key={t.id}>
+                <tr className="border-t border-slate-100">
+                  <td className="p-2 align-top whitespace-nowrap">{formatDateFull(t.date)}</td>
+                  <td className="p-2 align-top">
+                    {t.merchant_name ?? t.name}
+                    {showReimburse && (
+                      <div className="text-xs mt-0.5">
+                        {linked ? (
+                          <span className="text-emerald-700">
+                            ↩ reimburses {rows.find((r) => r.id === t.reimburses_transaction_id)?.name ?? "an expense"}
+                            <button onClick={() => setLinkingId(linkingId === t.id ? null : t.id)}
+                              className="ml-1.5 text-slate-500 hover:text-slate-700">change</button>
+                            <button onClick={() => unlinkReimbursement(t.id)}
+                              className="ml-1.5 text-slate-400 hover:text-slate-600">unlink</button>
+                          </span>
+                        ) : t.effective_category !== "TRANSFER_IN" ? (
+                          <span className="text-emerald-700">
+                            ↩ reduces {prettifyCategory(t.effective_category)}
+                            <button onClick={() => setLinkingId(linkingId === t.id ? null : t.id)}
+                              className="ml-1.5 text-slate-500 hover:text-slate-700">
+                              {linkingId === t.id ? "close" : "link to an expense"}
+                            </button>
+                          </span>
+                        ) : (
+                          <button onClick={() => setLinkingId(linkingId === t.id ? null : t.id)}
+                            className="text-slate-500 hover:text-slate-700">
+                            {linkingId === t.id ? "Close" : "↩ Link to an expense"}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </td>
+                  <td className="p-2 align-top">
+                    <input value={draftFor(t)} onChange={(e) => setDraft(t.id, e.currentTarget.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") applyRule(t); }}
+                      className="border rounded px-1 py-0.5 w-40"
+                      title="Enter (or ‘apply to merchant’) saves a rule for this merchant" />
+                    {draftFor(t).trim() && draftFor(t) !== t.effective_category && (
+                      <div className="text-[11px] mt-0.5 flex gap-2">
+                        <button onClick={() => applyRule(t)} className="text-sky-600 hover:text-sky-800">
+                          apply to {(t.merchant_name ?? t.name).slice(0, 18)}
+                        </button>
+                        <button onClick={() => applyOneOff(t)} className="text-slate-400 hover:text-slate-600">
+                          just this one
+                        </button>
+                      </div>
+                    )}
+                  </td>
+                  <td className={`p-2 text-right align-top ${t.amount < 0 ? "text-emerald-600" : ""}`}>
+                    {formatCurrency(t.amount)}
+                  </td>
+                  <td className="p-2 text-right align-top">
+                    {t.is_manual && (
+                      <button onClick={() => removeTransaction(t.id)}
+                        className="text-red-500 text-xs">Delete</button>
+                    )}
+                  </td>
+                </tr>
+                {linkingId === t.id && (
+                  <tr className="border-t border-slate-50">
+                    <td colSpan={5} className="p-2 bg-slate-50">
+                      <div className="max-w-md">
+                        <ExpensePicker
+                          expenses={rows}
+                          onPick={(eid) => linkReimbursement(t.id, eid)}
+                          onCancel={() => setLinkingId(null)}
+                        />
+                      </div>
+                    </td>
+                  </tr>
                 )}
-              </td>
-            </tr>
-          ))}
-          {rows.length === 0 && <tr><td colSpan={5} className="p-4 text-slate-500">No transactions.</td></tr>}
+              </Fragment>
+            );
+          })}
+          {visible.length === 0 && (
+            <tr><td colSpan={5} className="p-4 text-slate-500">
+              {rows.length === 0 ? "No transactions." : "No transactions match your search."}
+            </td></tr>
+          )}
         </tbody>
       </table>
     </div>

@@ -44,11 +44,11 @@ SENTINEL_SESSION = object()
 def test_plain_reply_no_delegation():
     client = _FakeClient([_FakeResp("end_turn", [_text("Hi! Ask me about budgets or investing.")])])
     out = agent.run_copilot(SENTINEL_SESSION, [{"role": "user", "content": "hello"}], client=client)
-    assert out == {"reply": "Hi! Ask me about budgets or investing.", "actions": [], "refresh": False}
+    assert out == {"reply": "Hi! Ask me about budgets or investing.", "actions": [], "refresh": False, "ui_actions": []}
     assert len(client.messages.calls) == 1
-    # both delegation tools are advertised to the model
+    # all delegation tools are advertised to the model
     tool_names = {t["name"] for t in client.messages.calls[0]["tools"]}
-    assert tool_names == {"ask_budgeting", "ask_investing"}
+    assert tool_names == {"ask_budgeting", "ask_investing", "ask_goals", "configure_dashboard"}
 
 
 def test_delegates_to_budgeting_and_bubbles_actions(monkeypatch):
@@ -77,6 +77,25 @@ def test_delegates_to_budgeting_and_bubbles_actions(monkeypatch):
     assert followup["type"] == "tool_result" and "FOOD budget" in followup["content"]
 
 
+def test_delegates_to_goals_and_bubbles_actions(monkeypatch):
+    seen = {}
+
+    def spy_goals(session, messages, client=None):
+        seen["question"] = messages[0]["content"]
+        return {"reply": "Added your Bench press goal.", "actions": ["Created goal Bench press"]}
+
+    monkeypatch.setattr(agent, "run_goals", spy_goals)
+    client = _FakeClient([
+        _FakeResp("tool_use", [_tool_use("t1", "ask_goals", question="track bench press 275 to 315 in 1000 CLUB")]),
+        _FakeResp("end_turn", [_text("Done — added your Bench press goal to 1000 CLUB.")]),
+    ])
+    out = agent.run_copilot(SENTINEL_SESSION, [{"role": "user", "content": "set a bench goal"}], client=client)
+
+    assert out["reply"] == "Done — added your Bench press goal to 1000 CLUB."
+    assert out["actions"] == ["Created goal Bench press"] and out["refresh"] is True
+    assert "bench press" in seen["question"].lower()
+
+
 def test_delegates_to_investing_no_actions(monkeypatch):
     monkeypatch.setattr(agent, "run_investing", lambda messages, client=None: {"reply": "You hold VTI — diversified."})
     client = _FakeClient([
@@ -87,6 +106,21 @@ def test_delegates_to_investing_no_actions(monkeypatch):
     assert out["reply"] == "You own VTI, a broad index ETF."
     assert out["actions"] == []
     assert out["refresh"] is False
+
+
+def test_configures_dashboard():
+    client = _FakeClient([
+        _FakeResp("tool_use", [_tool_use("t1", "configure_dashboard", operation="add", widget_ids=["budget-progress", "portfolio-summary"])]),
+        _FakeResp("end_turn", [_text("Done - I added budget progress and portfolio summary to your dashboard.")]),
+    ])
+    out = agent.run_copilot(SENTINEL_SESSION, [{"role": "user", "content": "add budget progress to my dashboard"}], client=client)
+
+    assert out["actions"] == ["Added dashboard widgets: budget-progress, portfolio-summary"]
+    assert out["ui_actions"] == [{
+        "type": "dashboard.add_widgets",
+        "widget_ids": ["budget-progress", "portfolio-summary"],
+    }]
+    assert out["refresh"] is True
 
 
 def test_cross_domain_calls_both_specialists(monkeypatch):
@@ -142,6 +176,35 @@ def test_unknown_tool_handled():
     assert "unknown tool" in followup["content"]
 
 
+def test_empty_model_text_falls_back_to_actions_summary(monkeypatch):
+    # Weak model delegates, then ends the turn with blank text — must not be surfaced blank.
+    monkeypatch.setattr(
+        agent, "run_budgeting",
+        lambda session, messages, client=None: {
+            "reply": "Created 5 rules.", "actions": ["Created 5 merchant rule(s) from history"]},
+    )
+    client = _FakeClient([
+        _FakeResp("tool_use", [_tool_use("t1", "ask_budgeting", question="reclassify from history")]),
+        _FakeResp("end_turn", [_text("   ")]),
+    ])
+    out = agent.run_copilot(SENTINEL_SESSION, [{"role": "user", "content": "reclassify"}], client=client)
+    assert out["reply"].strip() != ""
+    assert "Created 5 merchant rule(s) from history" in out["reply"]
+    assert out["refresh"] is True
+
+
+def test_empty_model_text_without_actions_has_fallback():
+    client = _FakeClient([_FakeResp("end_turn", [_text("")])])
+    out = agent.run_copilot(SENTINEL_SESSION, [{"role": "user", "content": "hi"}], client=client)
+    assert out["reply"].strip() != ""
+
+
+def test_max_tokens_truncation_is_not_blank():
+    client = _FakeClient([_FakeResp("max_tokens", [])])  # truncated, no text block
+    out = agent.run_copilot(SENTINEL_SESSION, [{"role": "user", "content": "do a lot"}], client=client)
+    assert out["reply"].strip() != ""
+
+
 # --- router wiring (uses the DB-backed client fixture from conftest) ---
 
 def test_router_success(client, monkeypatch):
@@ -149,11 +212,11 @@ def test_router_success(client, monkeypatch):
 
     monkeypatch.setattr(
         copilot_router, "run_copilot",
-        lambda session, messages: {"reply": "hi", "actions": ["did a thing"], "refresh": True},
+        lambda session, messages: {"reply": "hi", "actions": ["did a thing"], "refresh": True, "ui_actions": []},
     )
     resp = client.post("/api/assistant/chat", json={"messages": [{"role": "user", "content": "hi"}]})
     assert resp.status_code == 200
-    assert resp.json() == {"reply": "hi", "actions": ["did a thing"], "refresh": True}
+    assert resp.json() == {"reply": "hi", "actions": ["did a thing"], "refresh": True, "ui_actions": []}
 
 
 def test_router_missing_key_is_400(client, monkeypatch):
