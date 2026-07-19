@@ -215,12 +215,22 @@ struct GoalCategoryWidget: View {
     @State private var addingToGroup = false
     @State private var renamingGroup = false
     @State private var renameDraft = ""
-    @State private var customizing = false
+    @State private var pickingIcon = false
+    @State private var pickingColor = false
+    @State private var nameDraft = ""
 
     init(category: GoalCategory) {
         self.category = category
         _expanded = AppStorage(wrappedValue: false, LocalUIStateKey.goalCategoryExpanded(category.id))
         _chartExpanded = AppStorage(wrappedValue: false, LocalUIStateKey.goalCategoryChartExpanded(category.id))
+    }
+
+    private var focused: Bool { store.isFocused(category.id) }
+    /// Preserves the pre-focus-mode tint rule (custom color, else the ongoing-streak
+    /// honey accent, else brand) so unfocused rendering stays identical to today.
+    private var groupAccent: Color {
+        category.customColor.map(Customization.color(for:))
+            ?? (category.id.hasSuffix("section:ongoing") ? Theme.honey : Theme.brand)
     }
 
     var body: some View {
@@ -246,32 +256,22 @@ struct GoalCategoryWidget: View {
         } message: {
             Text("Every goal in this card will move together under the new name.")
         }
-        .sheet(isPresented: $customizing) {
-            IconColorPicker(title: "Group appearance",
-                            defaultIcon: "tag",
-                            icon: category.customIcon, color: category.customColor) { icon, color in
-                Task {
-                    if let groupName = category.groupName {
-                        await store.setGroupAppearance(groupName, icon: icon, color: color)
-                    }
-                }
-            }.tint(Theme.brand)
-        }
     }
 
     private var categoryCard: some View {
         WidgetCard("") { categoryHeader; expandedContent }
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(Theme.brand, lineWidth: focused ? 2 : 0))
+            .onLongPressGesture(minimumDuration: 0.4) {
+                nameDraft = category.groupName ?? category.name
+                store.focus(category.id)
+            }
             .contextMenu {
                 Button { addingToGroup = true } label: {
                     Label(category.composerMode == .routine ? "Add routine here" : "Add goal here", systemImage: "plus")
                 }
                 Button { beginRename() } label: {
                     Label("Rename group", systemImage: "pencil")
-                }
-                if category.groupName != nil {
-                    Button { customizing = true } label: {
-                        Label("Customize group", systemImage: "paintpalette")
-                    }
                 }
                 Divider()
                 Button(role: .destructive) { endGroup() } label: {
@@ -280,35 +280,86 @@ struct GoalCategoryWidget: View {
             }
     }
 
+    /// When focused, the icon/name/gauge become live edit controls, so the header can't
+    /// be wrapped in the whole-area expand `Button` any more (a `Button` swallows taps
+    /// meant for controls nested in its label). Not-focused rendering keeps the original
+    /// tap-anywhere-to-expand `Button` wrapper unchanged.
     private var categoryHeader: some View {
-        Button { withAnimation { expanded.toggle() } } label: {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption).foregroundStyle(.secondary)
-                    IconChip(
-                        symbol: category.customIcon.map(Customization.symbol(for:)) ?? category.icon,
-                        tint: category.customColor.map(Customization.color(for:))
-                            ?? (category.id.hasSuffix("section:ongoing") ? Theme.honey : Theme.brand))
-                    Text(category.name).font(.headline)
-                    GoalCountBadge(count: category.goals.count)
-                    Spacer()
-                    if let aggregate = category.aggregate {
-                        Text("\(aggregate.cleanNumber)%")
-                            .font(.system(.subheadline, design: .rounded).weight(.bold).monospacedDigit())
-                            .foregroundStyle(category.hasGoalOverLimit ? Theme.negative : Theme.brand)
+        Group {
+            if focused {
+                headerContent
+            } else {
+                Button { withAnimation { expanded.toggle() } } label: { headerContent }
+                    .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var headerContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption).foregroundStyle(.secondary)
+                if focused {
+                    Button { pickingIcon = true } label: {
+                        IconChip(symbol: category.customIcon.map(Customization.symbol(for:)) ?? category.icon,
+                                 tint: groupAccent)
                     }
+                    .buttonStyle(.plain)
+                    .popover(isPresented: $pickingIcon) {
+                        IconPickerPopover(selected: category.customIcon,
+                                          defaultIcon: "tag", accent: groupAccent) { token in
+                            pickingIcon = false
+                            if let name = category.groupName {
+                                Task { await store.setGroupAppearance(name, icon: token, color: category.customColor) }
+                            }
+                        }
+                    }
+                } else {
+                    IconChip(symbol: category.customIcon.map(Customization.symbol(for:)) ?? category.icon,
+                             tint: groupAccent)
+                }
+                if focused {
+                    TextField("Group name", text: $nameDraft)
+                        .font(.headline).textFieldStyle(.roundedBorder)
+                        .onSubmit {
+                            Task { _ = await store.renameGoalGroup(category.goals, to: nameDraft) }
+                        }
+                } else {
+                    Text(category.name).font(.headline)
+                }
+                GoalCountBadge(count: category.goals.count)
+                Spacer()
+                if focused {
+                    Button("Done") { store.clearFocus() }
+                        .font(.caption.weight(.semibold)).foregroundStyle(Theme.brand)
                 }
                 if let aggregate = category.aggregate {
-                    GaugeBar(
-                        pct: aggregate,
-                        tint: category.customColor.map(Customization.color(for:)) ?? Theme.brand,
-                        over: category.hasGoalOverLimit,
-                        reverse: category.aggregateIsReversed
-                    )
+                    Text("\(aggregate.cleanNumber)%")
+                        .font(.system(.subheadline, design: .rounded).weight(.bold).monospacedDigit())
+                        .foregroundStyle(category.hasGoalOverLimit ? Theme.negative : Theme.brand)
+                }
+            }
+            if let aggregate = category.aggregate {
+                if focused {
+                    Button { pickingColor = true } label: {
+                        GaugeBar(pct: aggregate, tint: groupAccent,
+                                 over: category.hasGoalOverLimit, reverse: category.aggregateIsReversed)
+                    }
+                    .buttonStyle(.plain)
+                    .popover(isPresented: $pickingColor) {
+                        ColorPickerPopover(selected: category.customColor) { token in
+                            pickingColor = false
+                            if let name = category.groupName {
+                                Task { await store.setGroupAppearance(name, icon: category.customIcon, color: token) }
+                            }
+                        }
+                    }
+                } else {
+                    GaugeBar(pct: aggregate, tint: groupAccent,
+                             over: category.hasGoalOverLimit, reverse: category.aggregateIsReversed)
                 }
             }
         }
-        .buttonStyle(.plain)
     }
 
     @ViewBuilder private var expandedContent: some View {
