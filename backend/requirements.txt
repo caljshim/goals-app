@@ -1,6 +1,7 @@
 fastapi>=0.111
 uvicorn[standard]>=0.30
 sqlmodel>=0.0.21
+psycopg[binary]>=3.2
 plaid-python>=20.0.0
 pydantic-settings>=2.3
 python-dotenv>=1.0

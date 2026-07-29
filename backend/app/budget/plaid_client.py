@@ -26,15 +26,20 @@ def get_client() -> plaid_api.PlaidApi:
     return plaid_api.PlaidApi(plaid.ApiClient(config))
 
 
-def create_link_token(client) -> str:
+def create_link_token(client, access_token: str | None = None) -> str:
     s = get_settings()
     kwargs = dict(
         user=LinkTokenCreateRequestUser(client_user_id="local-user"),
         client_name="Finance Tracker",
-        products=[Products(p) for p in s.plaid_products.split(",")],
         country_codes=[CountryCode(c) for c in s.plaid_country_codes.split(",")],
         language="en",
     )
+    if access_token:
+        # Plaid update mode repairs the existing Item. Products must be omitted;
+        # the access token selects the Item and remains unchanged after success.
+        kwargs["access_token"] = access_token
+    else:
+        kwargs["products"] = [Products(p) for p in s.plaid_products.split(",")]
     if s.plaid_redirect_uri:
         kwargs["redirect_uri"] = s.plaid_redirect_uri
     req = LinkTokenCreateRequest(**kwargs)
@@ -60,6 +65,7 @@ def fetch_accounts(client, access_token: str) -> list[dict]:
         current, available, currency = _balance(a)
         out.append({
             "plaid_account_id": a.account_id,
+            "persistent_account_id": getattr(a, "persistent_account_id", None),
             "name": a.name,
             "official_name": a.official_name,
             "type": str(a.type),

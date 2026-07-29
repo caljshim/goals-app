@@ -76,3 +76,18 @@ def test_portfolio_api_failure_is_502(client, monkeypatch):
     resp = client.get("/api/portfolio")
     assert resp.status_code == 502
     assert "token expired" in resp.json()["detail"]
+
+
+def test_investing_mutation_routes_are_hard_blocked(client):
+    for path in (
+        "/api/portfolio",
+        "/api/portfolio/orders",
+        "/api/invest/orders",
+        "/api/orders",
+        "/api/trades",
+    ):
+        response = client.post(path, json={})
+        assert response.status_code == 403
+        assert response.json()["detail"] == (
+            "Investing is read-only; trade mutations are disabled."
+        )

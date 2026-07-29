@@ -1,6 +1,6 @@
 from datetime import date, datetime, timedelta
 
-from app.budget.models import Account, Goal, PlaidItem
+from app.budget.models import Account, Goal, GoalCheckin, PlaidItem
 
 
 def _account(session, **kw):
@@ -148,6 +148,70 @@ def test_weekly_goal_supports_multiple_reminder_days(client, session):
     assert updated.json()["weekly_days"] == ["tuesday", "thursday"]
 
 
+def test_routine_reminder_time_round_trips_and_is_in_tasks(client):
+    weekday = date.today().strftime("%A").lower()
+    created = client.post("/api/goals", json={
+        "name": "Church", "kind": "numeric", "target": 1, "period": "weekly",
+        "weekly_days": [weekday], "reminder_time": "9:05",
+    })
+    assert created.status_code == 201
+    assert created.json()["reminder_time"] == "09:05"
+
+    tasks = client.get("/api/goal-tasks", params={"scope": "week"}).json()
+    occurrence = next(task for task in tasks if task["goal_id"] == created.json()["id"])
+    assert occurrence["reminder_time"] == "09:05"
+
+    updated = client.patch(f"/api/goals/{created.json()['id']}", json={"reminder_time": "18:30"})
+    assert updated.status_code == 200
+    assert updated.json()["reminder_time"] == "18:30"
+
+
+def test_routine_reminder_time_rejects_invalid_values(client):
+    response = client.post("/api/goals", json={
+        "name": "Church", "kind": "numeric", "target": 1, "period": "weekly",
+        "weekly_days": ["sunday"], "reminder_time": "25:99",
+    })
+    assert response.status_code == 400
+
+
+def test_persistent_daily_routine_defaults_to_hourly_nudges(client):
+    created = client.post("/api/goals", json={
+        "name": "Take vitamins", "kind": "numeric", "target": 1, "period": "daily",
+        "reminder_time": "09:00", "repeat_until_completed": True,
+    })
+    assert created.status_code == 201
+    assert created.json()["repeat_until_completed"] is True
+    assert created.json()["nudge_interval_minutes"] == 60
+
+    updated = client.patch(f"/api/goals/{created.json()['id']}", json={
+        "repeat_until_completed": False,
+    })
+    assert updated.status_code == 200
+    assert updated.json()["repeat_until_completed"] is False
+    assert updated.json()["nudge_interval_minutes"] is None
+
+
+def test_persistent_routine_requires_recurring_cadence_time_and_safe_interval(client):
+    no_time = client.post("/api/goals", json={
+        "name": "Take vitamins", "kind": "numeric", "target": 1, "period": "daily",
+        "repeat_until_completed": True,
+    })
+    assert no_time.status_code == 400
+
+    one_time = client.post("/api/goals", json={
+        "name": "Take vitamins", "kind": "numeric", "target": 1, "period": "once",
+        "reminder_time": "09:00", "repeat_until_completed": True,
+    })
+    assert one_time.status_code == 400
+
+    too_frequent = client.post("/api/goals", json={
+        "name": "Take vitamins", "kind": "numeric", "target": 1, "period": "daily",
+        "reminder_time": "09:00", "repeat_until_completed": True,
+        "nudge_interval_minutes": 5,
+    })
+    assert too_frequent.status_code == 400
+
+
 def test_missed_goal_task_is_locked_without_manual_override(client, session):
     yesterday = date.today() - timedelta(days=1)
     weekday = yesterday.strftime("%A").lower()
@@ -171,6 +235,13 @@ def test_missed_goal_task_is_locked_without_manual_override(client, session):
     assert corrected.status_code == 200
     assert corrected.json()["completed"] is True
 
+    # Once completed, `missed` is false. An accidental check must still be
+    # reversible without depending on that transient flag.
+    unchecked = client.patch(f"/api/goals/{goal.id}/checkin",
+                             json={"scheduled_for": yesterday.isoformat(), "completed": False})
+    assert unchecked.status_code == 200
+    assert unchecked.json()["completed"] is False
+
 
 class _FrozenWednesday(date):
     @classmethod
@@ -178,7 +249,47 @@ class _FrozenWednesday(date):
         return date(2026, 7, 22)  # a Wednesday; the week runs Sun 7/19 – Sat 7/25
 
 
-def test_week_view_hides_next_week_while_current_week_has_days_left(client, session, monkeypatch):
+def test_weekly_streak_counts_consecutive_completed_weeks(client, session, monkeypatch):
+    from app.budget.services import goals as goals_svc
+    monkeypatch.setattr(goals_svc, "date", _FrozenWednesday)
+
+    made = client.post("/api/goals", json={
+        "name": "Church", "kind": "numeric", "target": 1,
+        "period": "weekly", "weekly_days": ["wednesday"],
+    }).json()
+    goal = session.get(Goal, made["id"])
+    goal.created_at = datetime(2026, 6, 1)
+    session.add(goal)
+    for scheduled in (date(2026, 7, 22), date(2026, 7, 15), date(2026, 7, 8)):
+        session.add(GoalCheckin(goal_id=goal.id, scheduled_for=scheduled))
+    session.commit()
+
+    assert client.get("/api/goals").json()[0]["weekly_streak"] == 3
+
+
+def test_in_progress_week_does_not_break_weekly_streak(client, session, monkeypatch):
+    from app.budget.services import goals as goals_svc
+    monkeypatch.setattr(goals_svc, "date", _FrozenWednesday)
+
+    made = client.post("/api/goals", json={
+        "name": "Retinol", "kind": "numeric", "target": 2,
+        "period": "weekly", "weekly_days": ["monday", "friday"],
+    }).json()
+    goal = session.get(Goal, made["id"])
+    goal.created_at = datetime(2026, 6, 1)
+    session.add(goal)
+    for scheduled in (
+        date(2026, 7, 13), date(2026, 7, 17),
+        date(2026, 7, 6), date(2026, 7, 10),
+    ):
+        session.add(GoalCheckin(goal_id=goal.id, scheduled_for=scheduled))
+    session.commit()
+
+    # Friday 7/24 is not due yet, so the unfinished active week is ignored.
+    assert client.get("/api/goals").json()[0]["weekly_streak"] == 2
+
+
+def test_week_view_keeps_each_selected_day_visible_for_new_routine(client, session, monkeypatch):
     from app.budget.services import goals as goals_svc
     monkeypatch.setattr(goals_svc, "date", _FrozenWednesday)
 
@@ -190,7 +301,7 @@ def test_week_view_hides_next_week_while_current_week_has_days_left(client, sess
 
     dates = [task["scheduled_for"] for task in client.get("/api/goal-tasks", params={"scope": "week"}).json()
              if task["goal_id"] == goal.id]
-    assert dates == ["2026-07-24"]  # this week's Friday only — nothing from next week
+    assert dates == ["2026-07-24", "2026-07-27"]
 
 
 def test_week_view_falls_back_to_next_week_when_created_after_last_scheduled_day(client, session, monkeypatch):
@@ -206,6 +317,24 @@ def test_week_view_falls_back_to_next_week_when_created_after_last_scheduled_day
     dates = [task["scheduled_for"] for task in client.get("/api/goal-tasks", params={"scope": "week"}).json()
              if task["goal_id"] == goal.id]
     assert dates == ["2026-07-27"]  # next Monday, so the checklist isn't empty
+
+
+def test_week_view_uses_the_configured_week_boundary(client, session, monkeypatch):
+    from app.budget.services import goals as goals_svc
+    monkeypatch.setattr(goals_svc, "date", _FrozenWednesday)
+
+    made = client.post("/api/goals", json={
+        "name": "Weekend routine", "kind": "numeric", "target": 2,
+        "period": "weekly", "weekly_days": ["friday", "sunday"],
+        "weekly_reset_day": "friday",
+    }).json()
+    goal = session.get(Goal, made["id"])
+    goal.created_at = datetime(2026, 7, 1)
+    session.add(goal); session.commit()
+
+    dates = [task["scheduled_for"] for task in client.get("/api/goal-tasks", params={"scope": "week"}).json()
+             if task["goal_id"] == goal.id]
+    assert dates == ["2026-07-10", "2026-07-12", "2026-07-17", "2026-07-19"]
 
 
 def test_custom_reset_settings_and_interval_round_trip(client, session):

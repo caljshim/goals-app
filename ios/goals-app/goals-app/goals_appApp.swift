@@ -9,6 +9,8 @@ import SwiftUI
 
 @main
 struct goals_appApp: App {
+    @UIApplicationDelegateAdaptor(ReminderNotificationDelegate.self) private var notificationDelegate
+
     var body: some Scene {
         WindowGroup {
             ContentView()

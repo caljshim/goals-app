@@ -17,14 +17,14 @@ export default function CopilotChat({ onApplied }: { onApplied?: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const conversationRef = useRef<HTMLDivElement>(null);
+  const conversationBottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const newId = () => crypto.randomUUID();
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
-      const conversation = conversationRef.current;
-      conversation?.scrollTo({ top: conversation.scrollHeight, behavior: "smooth" });
+      conversationBottomRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
     });
     return () => cancelAnimationFrame(frame);
   }, [messages, busy]);
@@ -88,7 +88,8 @@ export default function CopilotChat({ onApplied }: { onApplied?: () => void }) {
     <div className="flex flex-col bg-white rounded-xl border border-slate-200 lg:h-[calc(100vh-8rem)]">
       <div className="px-4 py-3 border-b border-slate-200 font-semibold">✨ Audel</div>
 
-      <div ref={conversationRef} className="flex-1 overflow-y-auto p-3 space-y-3 min-h-[16rem]">
+      <div ref={conversationRef} onTouchMove={() => inputRef.current?.blur()}
+        className="flex-1 overflow-y-auto p-3 space-y-3 min-h-[16rem]">
         {messages.length === 0 && (
           <div className="text-sm text-slate-500">
             <p className="mb-2">
@@ -136,6 +137,7 @@ export default function CopilotChat({ onApplied }: { onApplied?: () => void }) {
         ))}
 
         {busy && <div className="text-sm text-slate-400">Thinking…</div>}
+        <div ref={conversationBottomRef} aria-hidden="true" />
       </div>
 
       {error && (

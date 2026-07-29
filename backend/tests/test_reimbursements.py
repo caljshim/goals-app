@@ -1,16 +1,8 @@
 from datetime import date
 
-from sqlmodel import Session, SQLModel, create_engine
-from sqlmodel.pool import StaticPool
-
 from app.budget.models import Budget, Transaction
 from app.budget.services.summary import build_summary
-
-
-def make_session():
-    eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    SQLModel.metadata.create_all(eng)
-    return Session(eng)
+from tests.postgres import make_session_with_accounts as make_session
 
 
 def _add(s, **kw):

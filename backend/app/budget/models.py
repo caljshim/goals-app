@@ -11,12 +11,18 @@ class PlaidItem(SQLModel, table=True):
     access_token: str
     institution_name: Optional[str] = None
     sync_cursor: Optional[str] = None
+    # Version of the one-time authoritative transaction reconciliation applied
+    # to this Item. Existing databases start at 0 and repair on their next sync.
+    reconciliation_version: int = Field(default=0)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class Account(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     plaid_account_id: str = Field(index=True, unique=True)
+    # Plaid's cross-Item account identity. Unlike account_id, this survives a
+    # user accidentally creating a fresh Item for the same depository account.
+    persistent_account_id: Optional[str] = Field(default=None, index=True, unique=True)
     item_id: int = Field(foreign_key="plaiditem.id")
     name: str
     official_name: Optional[str] = None
@@ -42,7 +48,10 @@ class Transaction(SQLModel, table=True):
     # For an incoming P2P (Zelle/Venmo) reimbursement: the expense it pays back.
     # Nulling it out unlinks. Reductions net against the linked expense's month.
     reimburses_transaction_id: Optional[int] = Field(
-        default=None, foreign_key="transaction.id", index=True
+        default=None,
+        foreign_key="transaction.id",
+        ondelete="SET NULL",
+        index=True,
     )
 
 
@@ -112,6 +121,9 @@ class Goal(SQLModel, table=True):
     period: str = Field(default="once")
     period_anchor: Optional[date] = None
     weekly_day: Optional[str] = None  # preferred day: monday | ... | sunday
+    reminder_time: Optional[str] = None  # optional local due time, HH:MM
+    repeat_until_completed: bool = Field(default=False)
+    nudge_interval_minutes: Optional[int] = None
     reset_time: str = Field(default="00:00")
     weekly_reset_day: str = Field(default="sunday")
     monthly_reset_day: int = Field(default=1)
@@ -160,3 +172,51 @@ class GoalMilestone(SQLModel, table=True):
     goal_id: int = Field(foreign_key="goal.id", index=True)
     value: float
     at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Reminder(SQLModel, table=True):
+    """A one-time scheduled task. Recurring work stays in Goal and goal deadlines
+    stay attached to Goal; the schedule API also merges calendar events at read time."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str
+    scheduled_for: date = Field(index=True)
+    reminder_time: Optional[str] = None  # local wall-clock time, HH:MM
+    notes: Optional[str] = None
+    # Persistent reminders keep producing notification nudges until completed.
+    repeat_until_completed: bool = False
+    nudge_interval_minutes: Optional[int] = None
+    completed_at: Optional[datetime] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class CalendarEvent(SQLModel, table=True):
+    """A one-time calendar entry. Events describe where the user plans to be;
+    reminders remain actionable tasks with completion and nudge semantics."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str
+    scheduled_for: date = Field(index=True)
+    start_time: Optional[str] = None  # local wall-clock time, HH:MM; None is all-day
+    end_time: Optional[str] = None
+    location: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AgentJob(SQLModel, table=True):
+    """Persisted status for a potentially slow Audel action.
+
+    The HTTP request only creates the job. A background worker owns the model
+    call and database mutation, while clients can leave/reopen the app and
+    continue polling this row.
+    """
+    id: str = Field(primary_key=True)
+    kind: str = Field(index=True)
+    status: str = Field(default="queued", index=True)
+    stage: str = Field(default="Queued")
+    total: int = 0
+    completed: int = 0
+    result_json: Optional[str] = None
+    error: Optional[str] = None
+    idempotency_key: str = Field(index=True, unique=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)

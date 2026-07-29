@@ -51,6 +51,43 @@ def test_cannot_delete_plaid_transaction(client, session):
     assert resp.status_code == 400
 
 
+def test_manual_transaction_details_can_be_edited(client, session):
+    acc = _seed_account(session)
+    created = client.post("/api/transactions", json={
+        "account_id": acc.id, "date": "2026-07-01", "name": "Cash lunch", "amount": 12.5,
+    }).json()
+
+    updated = client.patch(f"/api/transactions/{created['id']}", json={
+        "account_id": acc.id,
+        "date": "2026-07-02",
+        "name": "Dinner",
+        "amount": 24.75,
+    })
+
+    assert updated.status_code == 200
+    assert updated.json()["date"] == "2026-07-02"
+    assert updated.json()["name"] == "Dinner"
+    assert updated.json()["amount"] == 24.75
+
+
+def test_cannot_edit_plaid_transaction_details(client, session):
+    acc = _seed_account(session)
+    transaction = Transaction(
+        plaid_transaction_id="p1",
+        account_id=acc.id,
+        date=date(2026, 7, 1),
+        name="Coffee",
+        amount=4.0,
+    )
+    session.add(transaction)
+    session.commit()
+    session.refresh(transaction)
+
+    response = client.patch(f"/api/transactions/{transaction.id}", json={"amount": 9.0})
+
+    assert response.status_code == 400
+
+
 def test_category_filter_uses_effective(client, session):
     acc = _seed_account(session)
     session.add(Transaction(account_id=acc.id, date=date(2026, 7, 1), name="A",

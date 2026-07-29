@@ -7,7 +7,7 @@ function transaction(id: number, date: string, isBudgeted: boolean | null): Tran
     id, date, is_budgeted: isBudgeted, account_id: 1, name: `Transaction ${id}`,
     merchant_name: null, amount: 10, category: "SHOPPING", user_category: null,
     effective_category: "SHOPPING", pending: false, is_manual: false,
-    reimburses_transaction_id: null,
+    reimburses_transaction_id: null, reimbursement_category: null,
   };
 }
 

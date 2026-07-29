@@ -13,6 +13,9 @@
 		A30000010000000000000001 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30000020000000000000002 /* Theme.swift */; };
 		A40000010000000000000001 /* LocalUIState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000020000000000000002 /* LocalUIState.swift */; };
 		A50000010000000000000001 /* Customization.swift in Sources */ = {isa = PBXBuildFile; fileRef = A50000020000000000000002 /* Customization.swift */; };
+		A60000010000000000000001 /* ChartTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = A60000020000000000000002 /* ChartTimeline.swift */; };
+		A70000010000000000000001 /* ScheduleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70000020000000000000002 /* ScheduleView.swift */; };
+		A80000010000000000000001 /* ReminderNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = A80000020000000000000002 /* ReminderNotifications.swift */; };
 		95D24B8D300C910F008A3F53 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 95D24B8C300C910F008A3F53 /* Assets.xcassets */; };
 		95D24B90300C910F008A3F53 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 95D24B8F300C910F008A3F53 /* Preview Assets.xcassets */; };
 		95D24B9A300C910F008A3F53 /* goals_appTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95D24B99300C910F008A3F53 /* goals_appTests.swift */; };
@@ -46,6 +49,9 @@
 		A30000020000000000000002 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		A40000020000000000000002 /* LocalUIState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalUIState.swift; sourceTree = "<group>"; };
 		A50000020000000000000002 /* Customization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Customization.swift; sourceTree = "<group>"; };
+		A60000020000000000000002 /* ChartTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChartTimeline.swift; sourceTree = "<group>"; };
+		A70000020000000000000002 /* ScheduleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleView.swift; sourceTree = "<group>"; };
+		A80000020000000000000002 /* ReminderNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReminderNotifications.swift; sourceTree = "<group>"; };
 		95D24B8C300C910F008A3F53 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		95D24B8F300C910F008A3F53 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		95D24B95300C910F008A3F53 /* goals-appTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "goals-appTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -110,6 +116,9 @@
 				A30000020000000000000002 /* Theme.swift */,
 				A40000020000000000000002 /* LocalUIState.swift */,
 				A50000020000000000000002 /* Customization.swift */,
+				A60000020000000000000002 /* ChartTimeline.swift */,
+				A70000020000000000000002 /* ScheduleView.swift */,
+				A80000020000000000000002 /* ReminderNotifications.swift */,
 				95D24B8C300C910F008A3F53 /* Assets.xcassets */,
 				95D24B8E300C910F008A3F53 /* Preview Content */,
 			);
@@ -282,6 +291,9 @@
 				A30000010000000000000001 /* Theme.swift in Sources */,
 				A40000010000000000000001 /* LocalUIState.swift in Sources */,
 				A50000010000000000000001 /* Customization.swift in Sources */,
+				A60000010000000000000001 /* ChartTimeline.swift in Sources */,
+				A70000010000000000000001 /* ScheduleView.swift in Sources */,
+				A80000010000000000000001 /* ReminderNotifications.swift in Sources */,
 				95D24B89300C910E008A3F53 /* goals_appApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -444,7 +456,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = "goals-app/goals-app.entitlements";
+				CODE_SIGN_ENTITLEMENTS = "goals-app/goals-app.debug.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"goals-app/Preview Content\"";
@@ -454,8 +466,8 @@
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -484,8 +496,8 @@
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

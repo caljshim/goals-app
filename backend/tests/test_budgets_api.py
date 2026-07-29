@@ -24,3 +24,18 @@ def test_budget_period_validation(client, session):
         "category": "GROCERIES", "monthly_limit": 50, "period": "yearly",
     })
     assert response.status_code == 400
+
+
+def test_budget_can_be_renamed_and_rescheduled(client, session):
+    created = client.post("/api/budgets", json={
+        "category": "DINING", "monthly_limit": 100, "period": "weekly",
+    }).json()
+
+    updated = client.patch(f"/api/budgets/{created['id']}", json={
+        "category": "eating out", "monthly_limit": 225, "period": "monthly",
+    })
+
+    assert updated.status_code == 200
+    assert updated.json()["category"] == "EATING_OUT"
+    assert updated.json()["monthly_limit"] == 225
+    assert updated.json()["period"] == "monthly"

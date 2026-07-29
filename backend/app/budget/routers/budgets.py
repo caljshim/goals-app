@@ -38,15 +38,29 @@ def update_budget(budget_id: int, body: BudgetUpdate, session: Session = Depends
         raise HTTPException(status_code=404, detail="Budget not found")
     if body.monthly_limit <= 0:
         raise HTTPException(status_code=400, detail="Budget limit must be positive")
+    next_period = body.period if body.period is not None else budget.period
+    next_category = (
+        body.category.strip().upper().replace(" ", "_")
+        if body.category is not None
+        else budget.category
+    )
+    if not next_category:
+        raise HTTPException(status_code=400, detail="Budget category is required")
     if body.period is not None:
-        if body.period not in VALID_PERIODS:
+        if next_period not in VALID_PERIODS:
             raise HTTPException(status_code=400, detail="Budget period must be daily, weekly, or monthly")
-        duplicate = session.exec(select(Budget).where(
-            Budget.category == budget.category, Budget.period == body.period, Budget.id != budget.id
-        )).first()
-        if duplicate:
-            raise HTTPException(status_code=409, detail=f"{body.period.title()} budget for this category already exists")
-        budget.period = body.period
+    duplicate = session.exec(select(Budget).where(
+        Budget.category == next_category,
+        Budget.period == next_period,
+        Budget.id != budget.id,
+    )).first()
+    if duplicate:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{next_period.title()} budget for this category already exists",
+        )
+    budget.category = next_category
+    budget.period = next_period
     budget.monthly_limit = body.monthly_limit
     session.add(budget); session.commit(); session.refresh(budget)
     return budget

@@ -14,6 +14,7 @@ import PlaidLinkButton from "./PlaidLinkButton";
 import UnbudgetedTransactionsNotice from "./UnbudgetedTransactionsNotice";
 import { AddBudgetForm, BudgetPeriodPicker, BudgetProgressList } from "./BudgetWidgets";
 import type { DashboardWidgetId } from "../dashboardConfig";
+import ScheduleCalendar, { ScheduleToday } from "./ScheduleCalendar";
 import { localMonthKey, unbudgetedTransactions } from "../unbudgeted";
 
 const COLORS = ["#0ea5e9", "#6366f1", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#14b8a6", "#f43f5e"];
@@ -351,6 +352,28 @@ function goalSection(g: Goal): "daily" | "weekly" | "monthly" | "interval" | "on
 }
 
 function GoalMiniCard({ goal }: { goal: Goal }) {
+  if (goal.kind === "streak") {
+    const days = goal.days ?? goal.current_value;
+    return (
+      <Card>
+        <div className="mb-3 flex items-center gap-3">
+          <div className="grid h-10 w-10 place-items-center rounded-full bg-amber-100 text-xl">🔥</div>
+          <div className="min-w-0">
+            <div className="truncate font-medium">{goal.name}</div>
+            <div className="text-xs text-slate-400">Current run</div>
+          </div>
+          <div className="ml-auto text-right">
+            <div className="text-xl font-bold tabular-nums">{days}</div>
+            <div className="text-xs text-slate-400">{days === 1 ? "day" : "days"}</div>
+          </div>
+        </div>
+        <div className="flex justify-between border-t border-amber-100 pt-2 text-xs text-slate-500">
+          <span>🏆 Best {goal.best_days ?? days}</span>
+          {goal.target != null && <span>Next {goal.target} days</span>}
+        </div>
+      </Card>
+    );
+  }
   const targetSeparator = goal.direction === "under" ? " → < " : " / ";
   const label = goal.unit === "$"
     ? `${formatCurrency(goal.current_value)}${goal.target != null ? `${targetSeparator}${formatCurrency(goal.target)}` : ""}`
@@ -497,6 +520,8 @@ export function DashboardWidgetContent({ id, onChange }: { id: DashboardWidgetId
   if (id === "account-sync") return <AccountSyncWidget />;
   if (id === "budget-progress") return <BudgetProgressWidget />;
   if (id === "budget-form") return <BudgetFormWidget />;
+  if (id === "schedule-calendar") return <ScheduleCalendar />;
+  if (id === "schedule-today") return <ScheduleToday />;
   if (id.startsWith("goal:") || id.startsWith("goal-name:") || id.startsWith("goal-group:") || id.startsWith("goal-section:") || id.startsWith("routine-group:") || id.startsWith("routine-section:")) {
     return <GoalWidget id={id} />;
   }

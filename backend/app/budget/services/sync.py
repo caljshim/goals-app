@@ -8,11 +8,11 @@ from app.budget.models import Account, PlaidItem, Transaction
 # Syncs must not overlap. The frontend fires /plaid/sync from several unguarded
 # places (the 15-min auto-sync, the "Refresh from bank" button, the Accounts
 # "Sync transactions" button), and FastAPI runs the endpoint in a threadpool, so
-# two syncs can run at once on separate SQLite connections. _upsert's
+# two syncs can run at once on separate PostgreSQL connections. _upsert's
 # check-then-insert is not atomic across connections: both SELECT a new
 # transaction, find nothing, and INSERT it, so the loser hits
-# "UNIQUE constraint failed: transaction.plaid_transaction_id" (surfaced via
-# autoflush). This app is a single process, so serialising sync runs closes the
+# the unique plaid_transaction_id constraint (surfaced via autoflush). This app
+# is a single process, so serialising sync runs closes the
 # race — the waiting sync sees the committed rows and updates instead of
 # re-inserting.
 _sync_lock = threading.Lock()
@@ -45,6 +45,105 @@ def _natural_match(
         (row for row in candidates if row.id in eligible_rows and row.id not in claimed_rows),
         None,
     )
+
+
+def _merchant_identity(name: str | None, merchant_name: str | None) -> str:
+    return " ".join((merchant_name or name or "").strip().casefold().split())
+
+
+def _natural_key(account_id: int, data: dict) -> tuple:
+    return (
+        account_id,
+        data["date"],
+        round(float(data["amount"]), 2),
+        _merchant_identity(data["name"], data["merchant_name"]),
+        bool(data["pending"]),
+    )
+
+
+def _row_key(row: Transaction) -> tuple:
+    return (
+        row.account_id,
+        row.date,
+        round(float(row.amount), 2),
+        _merchant_identity(row.name, row.merchant_name),
+        bool(row.pending),
+    )
+
+
+def _deduplicate_account_transactions(
+    session: Session,
+    account_ids: set[int],
+) -> int:
+    """Collapse duplicate Plaid rows with the same bank-statement fingerprint.
+
+    Plaid can assign new transaction IDs after an Item is linked again. Those
+    IDs are not sufficient to distinguish the replayed copy from the original,
+    so use account, posting date, amount, merchant, and pending state. Manual
+    transactions are excluded because two identical manual entries may be
+    intentional.
+    """
+    if not account_ids:
+        return 0
+
+    rows = session.exec(
+        select(Transaction).where(
+            Transaction.account_id.in_(account_ids),
+            Transaction.plaid_transaction_id.is_not(None),
+        )
+    ).all()
+    rows_by_key: dict[tuple, list[Transaction]] = {}
+    for row in rows:
+        rows_by_key.setdefault(_row_key(row), []).append(row)
+
+    referenced_ids = {
+        row.reimburses_transaction_id
+        for row in rows
+        if row.reimburses_transaction_id is not None
+    }
+    replacements: dict[int, int] = {}
+    duplicate_rows: list[Transaction] = []
+
+    for matches in rows_by_key.values():
+        if len(matches) < 2:
+            continue
+        # Preserve user work first, then prefer the oldest local row. Relinks
+        # generally created the newer copy.
+        keeper = max(
+            matches,
+            key=lambda row: (
+                row.user_category is not None,
+                row.id in referenced_ids,
+                row.reimburses_transaction_id is not None,
+                -(row.id or 0),
+            ),
+        )
+        for row in matches:
+            if row.id == keeper.id:
+                continue
+            if keeper.user_category is None and row.user_category is not None:
+                keeper.user_category = row.user_category
+            if (
+                keeper.reimburses_transaction_id is None
+                and row.reimburses_transaction_id is not None
+            ):
+                keeper.reimburses_transaction_id = row.reimburses_transaction_id
+            replacements[row.id] = keeper.id
+            duplicate_rows.append(row)
+        session.add(keeper)
+
+    if not replacements:
+        return 0
+
+    for row in rows:
+        replacement = replacements.get(row.reimburses_transaction_id)
+        if replacement is not None:
+            row.reimburses_transaction_id = replacement
+            session.add(row)
+    for row in duplicate_rows:
+        session.delete(row)
+    session.flush()
+    return len(duplicate_rows)
 
 
 def _upsert(
@@ -85,9 +184,10 @@ def _upsert(
 
 def sync_item(session: Session, item: PlaidItem, client) -> dict:
     with _sync_lock:
-        counts = {"added": 0, "modified": 0, "removed": 0}
+        counts = {"added": 0, "modified": 0, "removed": 0, "deduplicated": 0}
         acct_map = _account_map(session, item.id)
         cursor = item.sync_cursor
+        full_history_sync = cursor is None
         reconcile_existing = cursor is None
         eligible_rows = set()
         if reconcile_existing:
@@ -121,6 +221,108 @@ def sync_item(session: Session, item: PlaidItem, client) -> dict:
             if not page["has_more"]:
                 break
         item.sync_cursor = cursor
+        if full_history_sync:
+            # The initial cursor replay plus _natural_match is the authoritative
+            # reconciliation for a freshly linked/relinked Item.
+            item.reconciliation_version = 1
+        session.flush()
+        counts["deduplicated"] = _deduplicate_account_transactions(
+            session, set(acct_map.values())
+        )
         session.add(item)
         session.commit()
     return counts
+
+
+def reconcile_item_duplicates(session: Session, item: PlaidItem, client) -> int:
+    """Remove stale transaction copies left by linking the same bank as a new Item.
+
+    A cursor-less Transactions Sync replay is authoritative for the active Item.
+    We first remove stale IDs when an otherwise-identical active transaction
+    exists, then collapse any identical active rows Plaid retained after a relink.
+    """
+    with _sync_lock:
+        account_map = _account_map(session, item.id)
+        account_ids = set(account_map.values())
+        if not account_ids:
+            item.reconciliation_version = 1
+            session.add(item)
+            session.commit()
+            return 0
+
+        active: dict[str, dict] = {}
+        cursor = None
+        while True:
+            page = plaid_client.sync_transactions(client, item.access_token, cursor)
+            for data in [*page["added"], *page["modified"]]:
+                if data["plaid_account_id"] in account_map:
+                    active[data["plaid_transaction_id"]] = data
+            for transaction_id in page["removed"]:
+                active.pop(transaction_id, None)
+            cursor = page["next_cursor"]
+            if not page["has_more"]:
+                break
+
+        active_ids_by_key: dict[tuple, set[str]] = {}
+        for transaction_id, data in active.items():
+            local_account_id = account_map.get(data["plaid_account_id"])
+            if local_account_id is None:
+                continue
+            active_ids_by_key.setdefault(
+                _natural_key(local_account_id, data), set()
+            ).add(transaction_id)
+
+        local_rows = session.exec(
+            select(Transaction).where(
+                Transaction.account_id.in_(account_ids),
+                Transaction.plaid_transaction_id.is_not(None),
+            )
+        ).all()
+        rows_by_key: dict[tuple, list[Transaction]] = {}
+        for row in local_rows:
+            rows_by_key.setdefault(_row_key(row), []).append(row)
+
+        replacements: dict[int, int] = {}
+        stale_rows: list[Transaction] = []
+        for key, rows in rows_by_key.items():
+            current_ids = active_ids_by_key.get(key, set())
+            if not current_ids:
+                continue
+            keepers = sorted(
+                (row for row in rows if row.plaid_transaction_id in current_ids),
+                key=lambda row: row.id,
+            )
+            stale = sorted(
+                (row for row in rows if row.plaid_transaction_id not in current_ids),
+                key=lambda row: row.id,
+            )
+            if not keepers:
+                continue
+            for index, row in enumerate(stale):
+                keeper = keepers[index % len(keepers)]
+                replacements[row.id] = keeper.id
+                if keeper.user_category is None and row.user_category is not None:
+                    keeper.user_category = row.user_category
+                if (
+                    keeper.reimburses_transaction_id is None
+                    and row.reimburses_transaction_id is not None
+                ):
+                    keeper.reimburses_transaction_id = row.reimburses_transaction_id
+                session.add(keeper)
+                stale_rows.append(row)
+
+        if replacements:
+            for row in local_rows:
+                replacement = replacements.get(row.reimburses_transaction_id)
+                if replacement is not None:
+                    row.reimburses_transaction_id = replacement
+                    session.add(row)
+            for row in stale_rows:
+                session.delete(row)
+
+        session.flush()
+        duplicate_count = _deduplicate_account_transactions(session, account_ids)
+        item.reconciliation_version = 1
+        session.add(item)
+        session.commit()
+        return len(stale_rows) + duplicate_count

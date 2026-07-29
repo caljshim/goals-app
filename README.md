@@ -29,8 +29,16 @@ Backend (port 8100):
 cd backend
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
+createdb audel
 copy .env.example .env   # then fill in credentials
 .venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8100
+```
+
+PostgreSQL 18 must be running before the backend starts. On macOS/Homebrew:
+
+```
+brew services start postgresql@18
+createdb audel
 ```
 
 Frontend (port 5273):
@@ -48,7 +56,9 @@ npm run dev   # http://localhost:5273
   no trade scope.
 - **Anthropic** — `ANTHROPIC_API_KEY` (or `CLAUDE_API_KEY`); `ASSISTANT_MODEL` picks the
   copilot model.
-- `DATABASE_URL` defaults to `sqlite:///./money.db`.
+- **PostgreSQL 18** — `DATABASE_URL` defaults to
+  `postgresql+psycopg://127.0.0.1:5432/audel`. With no username in the URL,
+  PostgreSQL uses the current OS username.
 
 ## Ports
 Backend **8100**, frontend **5273**. The Vite proxy targets `127.0.0.1:8100` (IPv4 on
@@ -56,4 +66,7 @@ purpose — `localhost` resolves to `::1` first on Windows and breaks the proxy)
 
 ## Tests
 - Backend: `cd backend && .venv\Scripts\python.exe -m pytest -q` (external APIs mocked).
+  Tests create and remove uniquely named PostgreSQL databases using
+  `TEST_POSTGRES_URL`, which defaults to
+  `postgresql+psycopg://127.0.0.1:5432/postgres`.
 - Frontend: `cd frontend && npm run test -- --run`.

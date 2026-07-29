@@ -46,6 +46,9 @@ describe("groupAggregate", () => {
   it("returns null when nothing is measurable", () => {
     expect(groupAggregate([g({ target: null })])).toBeNull();
   });
+  it("does not flatten streak cards into a generic group percentage", () => {
+    expect(groupAggregate([g({ kind: "streak", unit: "days", target: 30, current_value: 12, pct: 40 })])).toBeNull();
+  });
 });
 
 describe("isRoutine", () => {
@@ -54,12 +57,12 @@ describe("isRoutine", () => {
     expect(isRoutine(g({ kind: "numeric", period: "once" }))).toBe(false);
   });
 
-  it("moves recurring and streak work to Routines", () => {
+  it("moves recurring work to Routines but keeps streak outcomes in Goals", () => {
     expect(isRoutine(g({ period: "daily" }))).toBe(true);
     expect(isRoutine(g({ period: "weekly" }))).toBe(true);
     expect(isRoutine(g({ period: "monthly" }))).toBe(true);
     expect(isRoutine(g({ period: "interval" }))).toBe(true);
-    expect(isRoutine(g({ kind: "streak", period: "once" }))).toBe(true);
+    expect(isRoutine(g({ kind: "streak", period: "once" }))).toBe(false);
   });
 });
 
@@ -95,7 +98,7 @@ describe("dailySeries", () => {
       { value: 195, at: "2026-07-01T18:00:00" },
       { value: 205, at: "2026-07-03T17:00:00" },
     ];
-    const s = dailySeries(hist);
+    const s = dailySeries(hist, "2026-07-03");
     expect(s.map((p) => p.value)).toEqual([195, 195, 205]); // day1 last, day2 carried, day3
     expect(s.length).toBe(3);
   });

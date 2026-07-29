@@ -1,5 +1,7 @@
+import json
 from datetime import date
 
+from plaid.exceptions import ApiException
 from sqlmodel import select
 
 from app.budget.models import Account, PlaidItem, Transaction
@@ -12,6 +14,25 @@ def test_link_token(client, monkeypatch):
     resp = client.post("/api/plaid/link-token")
     assert resp.status_code == 200
     assert resp.json() == {"link_token": "link-sandbox-123"}
+
+
+def test_link_token_uses_update_mode_for_existing_item(client, session, monkeypatch):
+    item = PlaidItem(plaid_item_id="item_1", access_token="existing-access")
+    session.add(item); session.commit(); session.refresh(item)
+    seen = {}
+    monkeypatch.setattr(plaid_router, "get_client", lambda: object())
+
+    def create(client_object, access_token=None):
+        seen["access_token"] = access_token
+        return "update-link-token"
+
+    monkeypatch.setattr(plaid_router, "create_link_token", create)
+
+    response = client.post(f"/api/plaid/link-token?item_id={item.id}")
+
+    assert response.status_code == 200
+    assert response.json() == {"link_token": "update-link-token"}
+    assert seen["access_token"] == "existing-access"
 
 
 def test_exchange_creates_item_and_accounts(client, session, monkeypatch):
@@ -86,6 +107,52 @@ def test_exchange_relinks_matching_accounts_without_duplicates(client, session, 
     assert [item.plaid_item_id for item in session.exec(select(PlaidItem)).all()] == ["new_item"]
 
 
+def test_exchange_prefers_persistent_account_id_when_labels_change(
+    client, session, monkeypatch
+):
+    old_item = PlaidItem(plaid_item_id="old_item", access_token="old-token")
+    session.add(old_item); session.commit(); session.refresh(old_item)
+    old_account = Account(
+        plaid_account_id="old-account-id",
+        persistent_account_id="persistent-123",
+        item_id=old_item.id,
+        name="Everyday Checking",
+        type="depository",
+        subtype="checking",
+        mask="0992",
+    )
+    session.add(old_account); session.commit(); session.refresh(old_account)
+    old_account_id = old_account.id
+
+    monkeypatch.setattr(plaid_router, "get_client", lambda: object())
+    monkeypatch.setattr(
+        plaid_router,
+        "exchange_public_token",
+        lambda c, pt: {"access_token": "new-token", "item_id": "new_item"},
+    )
+    monkeypatch.setattr(plaid_router, "fetch_accounts", lambda c, tok: [{
+        "plaid_account_id": "new-account-id",
+        "persistent_account_id": "persistent-123",
+        "name": "TOTAL CHECKING (...0992)",
+        "official_name": "Total Checking",
+        "type": "depository",
+        "subtype": "checking",
+        "mask": "0992",
+        "current_balance": 125.0,
+        "available_balance": 120.0,
+        "currency": "USD",
+    }])
+
+    response = client.post("/api/plaid/exchange", json={"public_token": "public-tok"})
+
+    assert response.status_code == 200
+    session.expire_all()
+    accounts = session.exec(select(Account)).all()
+    assert len(accounts) == 1
+    assert accounts[0].id == old_account_id
+    assert accounts[0].plaid_account_id == "new-account-id"
+
+
 def test_refresh_requests_replay_for_each_item(client, session, monkeypatch):
     session.add(PlaidItem(plaid_item_id="item_1", access_token="tok-1"))
     session.add(PlaidItem(plaid_item_id="item_2", access_token="tok-2"))
@@ -98,7 +165,11 @@ def test_refresh_requests_replay_for_each_item(client, session, monkeypatch):
 
     resp = client.post("/api/plaid/refresh")
     assert resp.status_code == 200
-    assert resp.json() == {"requested": 2}
+    assert resp.json() == {
+        "requested": 2,
+        "accepted": 2,
+        "temporarily_unavailable": 0,
+    }
     assert refreshed == ["tok-1", "tok-2"]
 
 
@@ -120,6 +191,36 @@ def test_refresh_surfaces_plaid_error_as_502(client, session, monkeypatch):
     resp = client.post("/api/plaid/refresh")
     assert resp.status_code == 502
     assert "PRODUCT_NOT_READY" in resp.json()["detail"]
+
+
+def test_refresh_treats_temporary_institution_error_as_nonfatal(
+    client, session, monkeypatch
+):
+    session.add(PlaidItem(plaid_item_id="item_1", access_token="tok-1"))
+    session.add(PlaidItem(plaid_item_id="item_2", access_token="tok-2"))
+    session.commit()
+
+    def refresh(c, token):
+        if token == "tok-1":
+            error = ApiException(status=400, reason="Bad Request")
+            error.body = json.dumps({
+                "error_type": "INSTITUTION_ERROR",
+                "error_code": "INSTITUTION_NOT_RESPONDING",
+                "request_id": "safe-request-id",
+            })
+            raise error
+
+    monkeypatch.setattr(plaid_router, "get_client", lambda: object())
+    monkeypatch.setattr(plaid_router, "refresh_transactions", refresh)
+
+    response = client.post("/api/plaid/refresh")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "requested": 2,
+        "accepted": 1,
+        "temporarily_unavailable": 1,
+    }
 
 
 def test_sync_endpoint(client, session, monkeypatch):
@@ -194,7 +295,7 @@ def test_initial_sync_reconciles_relinked_transactions(client, session, monkeypa
     assert transactions[0].user_category == "EATING_OUT"
 
 
-def test_initial_sync_preserves_two_identical_new_transactions(client, session, monkeypatch):
+def test_initial_sync_collapses_two_identical_relink_transactions(client, session, monkeypatch):
     item = PlaidItem(plaid_item_id="item_1", access_token="token")
     session.add(item); session.commit(); session.refresh(item)
     account = Account(
@@ -227,8 +328,9 @@ def test_initial_sync_preserves_two_identical_new_transactions(client, session, 
     assert response.status_code == 200
     session.expire_all()
     rows = session.exec(select(Transaction)).all()
-    assert len(rows) == 2
-    assert {row.plaid_transaction_id for row in rows} == {"txn-1", "txn-2"}
+    assert len(rows) == 1
+    assert rows[0].plaid_transaction_id == "txn-1"
+    assert response.json()["deduplicated"] == 1
 
 
 def test_sync_ignores_manual_account_item(client, session, monkeypatch):
@@ -239,4 +341,9 @@ def test_sync_ignores_manual_account_item(client, session, monkeypatch):
     resp = client.post("/api/plaid/sync")
 
     assert resp.status_code == 200
-    assert resp.json() == {"added": 0, "modified": 0, "removed": 0}
+    assert resp.json() == {
+        "added": 0,
+        "modified": 0,
+        "removed": 0,
+        "deduplicated": 0,
+    }

@@ -16,9 +16,12 @@ _VALID_KINDS = set(GOAL_TYPES)
 _VALID_PERIODS = {"once", "daily", "weekly", "monthly", "interval"}
 _VALID_WEEKDAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
 _WEEKDAY_ORDER = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_WEEKDAY_INDEX = {day: index for index, day in enumerate(_WEEKDAY_ORDER)}
 _FINANCIAL_METRICS = {"account_balance", "category_spend", "debt_balance", "net_worth", "income", "cash_flow"}
 _FINANCIAL_RULES = {"reach", "stay_under", "reduce_to"}
 _FINANCIAL_SOURCES = {"accounts", "manual"}
+_MIN_NUDGE_MINUTES = 30
+_MAX_NUDGE_MINUTES = 1440
 
 
 def _normalize_weekly_days(value) -> list[str]:
@@ -30,6 +33,45 @@ def _normalize_weekly_days(value) -> list[str]:
     if unknown:
         raise ValueError(f"unknown weekday: {sorted(unknown)[0]}")
     return [day for day in _WEEKDAY_ORDER if day in days]
+
+
+def _normalize_reminder_time(value) -> str | None:
+    if value in (None, ""):
+        return None
+    try:
+        hour, minute = (int(part) for part in str(value).split(":"))
+        _require(0 <= hour <= 23 and 0 <= minute <= 59, "reminder_time must be HH:MM")
+    except (TypeError, ValueError):
+        raise ValueError("reminder_time must be HH:MM")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _persistent_routine_policy(
+    data: dict,
+    *,
+    period: str,
+    reminder_time: str | None,
+    current: Goal | None = None,
+) -> tuple[bool, int | None]:
+    persistent = bool(data.get(
+        "repeat_until_completed",
+        current.repeat_until_completed if current is not None else False,
+    ))
+    if not persistent:
+        return False, None
+    _require(period in {"daily", "weekly", "monthly", "interval"},
+             "persistent nudges require a recurring routine")
+    _require(bool(reminder_time), "persistent routines require a reminder_time")
+    raw_interval = data.get(
+        "nudge_interval_minutes",
+        current.nudge_interval_minutes if current is not None else None,
+    )
+    interval = int(raw_interval or 60)
+    _require(
+        _MIN_NUDGE_MINUTES <= interval <= _MAX_NUDGE_MINUTES,
+        f"nudge_interval_minutes must be between {_MIN_NUDGE_MINUTES} and {_MAX_NUDGE_MINUTES}",
+    )
+    return True, interval
 
 
 def _validate_reset_settings(data: dict, period: str) -> tuple[str, str, int, int | None]:
@@ -196,6 +238,9 @@ def _base_fields(g: Goal, account_links: dict[int, list[int]] | None = None,
         "direction": g.direction, "step": g.step, "group": g.group,
         "weekly_day": (g.weekly_day.split(",")[0] if g.weekly_day else None),
         "weekly_days": _normalize_weekly_days(g.weekly_day),
+        "reminder_time": g.reminder_time,
+        "repeat_until_completed": g.repeat_until_completed,
+        "nudge_interval_minutes": g.nudge_interval_minutes,
         "reset_time": g.reset_time, "weekly_reset_day": g.weekly_reset_day,
         "monthly_reset_day": g.monthly_reset_day, "interval_days": g.interval_days,
         "archived_at": g.archived_at,
@@ -207,13 +252,68 @@ def _base_fields(g: Goal, account_links: dict[int, list[int]] | None = None,
     }
 
 
+def _weekly_offset(day: str, week_starts_on: str) -> int:
+    """Number of days from a configured week boundary to a weekday."""
+    return (_WEEKDAY_INDEX[day] - _WEEKDAY_INDEX[week_starts_on]) % 7
+
+
+def _checkin_map(session: Session) -> dict[int, set[date]]:
+    completed: dict[int, set[date]] = defaultdict(set)
+    for checkin in session.exec(select(GoalCheckin)).all():
+        completed[checkin.goal_id].add(checkin.scheduled_for)
+    return completed
+
+
+def _weekly_streak(goal: Goal, completed: set[date], today: date) -> int:
+    """Return consecutive fully-completed scheduled weeks.
+
+    The active week is ignored until its final scheduled occurrence is due, so a
+    Sunday routine does not lose last week's streak on Monday morning. Weeks
+    before the routine was created are never considered.
+    """
+    if goal.period != "weekly":
+        return 0
+
+    selected = _normalize_weekly_days(goal.weekly_day) or ["saturday"]
+    created = min(goal.created_at.date(), today)
+    week_starts_on = goal.weekly_reset_day or "sunday"
+    week_start = goal_period_start(goal, datetime.combine(today, time.max))
+
+    def scheduled_dates(start: date) -> list[date]:
+        return [
+            start + timedelta(days=_weekly_offset(day, week_starts_on))
+            for day in selected
+            if start + timedelta(days=_weekly_offset(day, week_starts_on)) >= created
+        ]
+
+    if week_start is None:
+        return 0
+    current_dates = scheduled_dates(week_start)
+    if current_dates and max(current_dates) > today:
+        week_start -= timedelta(days=7)
+
+    streak = 0
+    while week_start + timedelta(days=6) >= created:
+        due = scheduled_dates(week_start)
+        if not due:
+            week_start -= timedelta(days=7)
+            continue
+        if not all(item in completed for item in due):
+            break
+        streak += 1
+        week_start -= timedelta(days=7)
+    return streak
+
+
 def goal_to_read(session: Session, goal: Goal) -> dict:
     account_links = _goal_account_map(session)
+    completed = _checkin_map(session).get(goal.id, set())
     return {
         **_base_fields(goal, account_links, _group_settings_map(session)),
         **goal_progress(goal, build_context(session)),
         "history": _history_map(session).get(goal.id, []),
         "milestones": _milestone_map(session).get(goal.id, []),
+        "weekly_streak": _weekly_streak(goal, completed, date.today()),
     }
 
 
@@ -225,9 +325,12 @@ def list_with_progress(session: Session, archived: bool = False) -> list[dict]:
     milestones = _milestone_map(session)
     account_links = _goal_account_map(session)
     group_settings = _group_settings_map(session)
+    checkins = _checkin_map(session)
+    today = date.today()
     return [
         {**_base_fields(g, account_links, group_settings), **goal_progress(g, ctx),
-         "history": history.get(g.id, []), "milestones": milestones.get(g.id, [])}
+         "history": history.get(g.id, []), "milestones": milestones.get(g.id, []),
+         "weekly_streak": _weekly_streak(g, checkins.get(g.id, set()), today)}
         for g in goals
     ]
 
@@ -255,11 +358,21 @@ def _task_dates(goal: Goal, scope: str, today: date) -> list[date]:
         next_starts = [current_start + timedelta(days=7)]
         selected = _normalize_weekly_days(goal.weekly_day)
         if selected:
-            offsets = {"sunday": 0, "monday": 1, "tuesday": 2, "wednesday": 3,
-                       "thursday": 4, "friday": 5, "saturday": 6}
-            dates = [start + timedelta(days=offsets[day]) for start in starts for day in selected]
-            upcoming = [start + timedelta(days=offsets[day]) for start in next_starts for day in selected]
+            week_starts_on = goal.weekly_reset_day or "sunday"
+            current_dates = [
+                current_start + timedelta(days=_weekly_offset(day, week_starts_on))
+                for day in selected
+            ]
+            dates = [
+                start + timedelta(days=_weekly_offset(day, week_starts_on))
+                for start in starts for day in selected
+            ]
+            upcoming = [
+                start + timedelta(days=_weekly_offset(day, week_starts_on))
+                for start in next_starts for day in selected
+            ]
         else:
+            current_dates = [current_start + timedelta(days=6)]
             dates = [start + timedelta(days=6) for start in starts]
             upcoming = [start + timedelta(days=6) for start in next_starts]
     else:
@@ -273,12 +386,17 @@ def _task_dates(goal: Goal, scope: str, today: date) -> list[date]:
     # Near midnight UTC that timestamp can be one day ahead locally, so clamp it to today.
     created = min(goal.created_at.date(), today)
     dates = [scheduled for scheduled in dates if scheduled >= created]
-    # Only surface the next period when the current one contributes nothing — e.g. a
-    # weekly goal created after this week's scheduled day — so the checklist is never
-    # empty, but everyone else isn't shown next week's tasks ahead of time.
-    if not any(scheduled >= current_start for scheduled in dates):
+    if scope == "week":
+        # Preserve every selected weekday on a newly-created routine's board. If
+        # this cycle's occurrence predates the routine, surface that weekday's next
+        # occurrence instead of silently dropping the checkbox.
+        dates += [
+            future for scheduled, future in zip(current_dates, upcoming)
+            if scheduled < created and future >= created
+        ]
+    elif not any(scheduled >= current_start for scheduled in dates):
         dates += [scheduled for scheduled in upcoming if scheduled >= created]
-    return dates
+    return sorted(set(dates))
 
 
 def list_tasks(session: Session, scope: str) -> list[dict]:
@@ -293,9 +411,48 @@ def list_tasks(session: Session, scope: str) -> list[dict]:
     return [
         {"goal_id": goal.id, "name": goal.name, "period": goal.period,
          "scheduled_for": scheduled, "completed": (goal.id, scheduled) in completed,
-         "missed": scheduled < today and (goal.id, scheduled) not in completed}
+         "missed": scheduled < today and (goal.id, scheduled) not in completed,
+         "reminder_time": goal.reminder_time}
         for goal in goals for scheduled in _task_dates(goal, scope, today)
     ]
+
+
+def routine_occurs_on(
+    goal: Goal,
+    scheduled_for: date,
+    today: date | None = None,
+    include_archived_history: bool = False,
+) -> bool:
+    """Whether a recurring goal owns an occurrence on a calendar date.
+
+    This is intentionally independent of the legacy current-period task windows so
+    calendar clients can request arbitrary bounded ranges without manufacturing rows.
+    """
+    if goal.period not in {"daily", "weekly", "monthly", "interval"}:
+        return False
+    if goal.archived_at is not None and not include_archived_history:
+        return False
+    if (
+        goal.archived_at is not None
+        and scheduled_for > goal.archived_at.date()
+    ):
+        return False
+    today = today or date.today()
+    created = min(goal.created_at.date(), today)
+    if scheduled_for < created:
+        return False
+    if goal.period == "daily":
+        return True
+    if goal.period == "interval":
+        return (scheduled_for - created).days % max(1, goal.interval_days or 1) == 0
+    if goal.period == "monthly":
+        return scheduled_for.day == max(1, min(goal.monthly_reset_day or 1, 28))
+
+    selected = _normalize_weekly_days(goal.weekly_day)
+    if selected:
+        return scheduled_for.strftime("%A").lower() in selected
+    week_start = goal_period_start(goal, datetime.combine(scheduled_for, datetime.max.time()))
+    return week_start is not None and scheduled_for == week_start + timedelta(days=6)
 
 
 def set_checkin(session: Session, goal_id: int, scheduled_for: date, completed: bool,
@@ -303,22 +460,28 @@ def set_checkin(session: Session, goal_id: int, scheduled_for: date, completed: 
     goal = session.get(Goal, goal_id)
     if not goal or goal.archived_at is not None or goal.period not in {"daily", "weekly", "monthly", "interval"}:
         return None
-    scope = {"daily": "day", "interval": "day", "weekly": "week", "monthly": "month"}[goal.period]
-    valid = {(task["goal_id"], task["scheduled_for"]) for task in list_tasks(session, scope)}
-    if (goal_id, scheduled_for) not in valid:
+    today = date.today()
+    if scheduled_for > today or not routine_occurs_on(goal, scheduled_for, today=today):
         return None
-    if scheduled_for < date.today() and not allow_overdue:
-        raise ValueError("Missed occurrences can only be corrected from the Goals tab")
     existing = session.exec(select(GoalCheckin).where(
         GoalCheckin.goal_id == goal_id, GoalCheckin.scheduled_for == scheduled_for
     )).first()
+    # Creating a late completion requires an explicit override. Reversing an
+    # existing check-in is always safe: otherwise its `missed` flag has already
+    # disappeared and clients cannot undo an accidental check.
+    if completed and not existing and scheduled_for < today and not allow_overdue:
+        raise ValueError("Missed occurrences require an overdue correction")
     if completed and not existing:
         session.add(GoalCheckin(goal_id=goal_id, scheduled_for=scheduled_for))
     elif not completed and existing:
         session.delete(existing)
     session.commit()
-    return next((task for task in list_tasks(session, scope)
-                 if task["goal_id"] == goal_id and task["scheduled_for"] == scheduled_for), None)
+    return {
+        "goal_id": goal.id, "name": goal.name, "period": goal.period,
+        "scheduled_for": scheduled_for, "completed": completed,
+        "missed": scheduled_for < today and not completed,
+        "reminder_time": goal.reminder_time,
+    }
 
 
 def _require(cond: bool, msg: str) -> None:
@@ -384,6 +547,10 @@ def create_goal(session: Session, data: dict) -> Goal:
         requested_days = data.get("weekly_day")
     weekly_days = _normalize_weekly_days(requested_days) if period == "weekly" else []
     weekly_day = ",".join(weekly_days) or None
+    reminder_time = _normalize_reminder_time(data.get("reminder_time"))
+    repeat_until_completed, nudge_interval_minutes = _persistent_routine_policy(
+        data, period=period, reminder_time=reminder_time
+    )
     reset_time, weekly_reset_day, monthly_reset_day, interval_days = _validate_reset_settings(data, period)
 
     # Recurring manual goals anchor their `current` to the current period so it resets
@@ -402,6 +569,9 @@ def create_goal(session: Session, data: dict) -> Goal:
         since=data.get("since") or (date.today() if kind == "streak" else None),
         deadline=data.get("deadline"),
         period=period, period_anchor=anchor, direction=direction, weekly_day=weekly_day,
+        reminder_time=reminder_time,
+        repeat_until_completed=repeat_until_completed,
+        nudge_interval_minutes=nudge_interval_minutes,
         reset_time=reset_time, weekly_reset_day=weekly_reset_day,
         monthly_reset_day=monthly_reset_day, interval_days=interval_days,
         step=(data.get("step") or 1.0), group=((data.get("group") or "").strip() or None),
@@ -431,7 +601,7 @@ def create_goal(session: Session, data: dict) -> Goal:
     return goal
 
 
-_EDITABLE = ("name", "target", "account_id", "category", "deadline", "group", "period", "weekly_day", "reset_time", "weekly_reset_day", "monthly_reset_day", "interval_days", "direction", "step", "financial_metric", "financial_rule", "financial_source", "icon", "color")
+_EDITABLE = ("name", "target", "account_id", "category", "deadline", "group", "period", "weekly_day", "reminder_time", "repeat_until_completed", "nudge_interval_minutes", "reset_time", "weekly_reset_day", "monthly_reset_day", "interval_days", "direction", "step", "financial_metric", "financial_rule", "financial_source", "icon", "color")
 
 
 def update_goal(session: Session, goal_id: int, data: dict) -> Goal | None:
@@ -452,6 +622,8 @@ def update_goal(session: Session, goal_id: int, data: dict) -> Goal | None:
         goal_customization.validate_icon(data["icon"])
     if "color" in data:
         goal_customization.validate_color(data["color"])
+    if "reminder_time" in data:
+        data = {**data, "reminder_time": _normalize_reminder_time(data["reminder_time"])}
     if goal.kind == "financial":
         next_source = data.get("financial_source") or goal.financial_source or "accounts"
         next_metric = data.get("financial_metric") or goal.financial_metric or "account_balance"
@@ -479,6 +651,13 @@ def update_goal(session: Session, goal_id: int, data: dict) -> Goal | None:
         if goal.anchor_value is None:
             goal.anchor_value = next_anchor
     next_period = data.get("period", goal.period)
+    next_reminder_time = data.get("reminder_time", goal.reminder_time)
+    repeat_until_completed, nudge_interval_minutes = _persistent_routine_policy(
+        data,
+        period=next_period,
+        reminder_time=next_reminder_time,
+        current=goal,
+    )
     requested_days = data.get("weekly_days")
     if requested_days is None:
         requested_days = data.get("weekly_day", goal.weekly_day)
@@ -491,7 +670,9 @@ def update_goal(session: Session, goal_id: int, data: dict) -> Goal | None:
          "interval_days": data.get("interval_days", goal.interval_days)}, next_period)
     data = {**data, "weekly_day": weekly_day, "reset_time": reset_time,
             "weekly_reset_day": weekly_reset_day, "monthly_reset_day": monthly_reset_day,
-            "interval_days": interval_days}
+            "interval_days": interval_days,
+            "repeat_until_completed": repeat_until_completed,
+            "nudge_interval_minutes": nudge_interval_minutes}
     for field in _EDITABLE:
         if field in data:
             setattr(goal, field, data[field])

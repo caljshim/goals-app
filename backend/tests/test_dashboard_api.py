@@ -1,9 +1,11 @@
 from datetime import date
 
 from app.budget.models import Budget, Transaction
+from tests.postgres import seed_accounts
 
 
 def test_dashboard_summary(client, session):
+    seed_accounts(session)
     session.add(Transaction(account_id=1, date=date(2026, 7, 2), name="G", amount=80.0, category="GROCERIES"))
     session.add(Transaction(account_id=1, date=date(2026, 7, 6), name="Pay", amount=-2000.0, category="INCOME"))
     session.add(Budget(category="GROCERIES", monthly_limit=300.0))

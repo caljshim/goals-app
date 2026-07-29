@@ -1566,6 +1566,7 @@ struct EmptyWidget: View { let text: String; var body: some View { VStack(spacin
 
 struct ContentView: View {
     @StateObject private var store: MoneyStore
+    @State private var hasCompletedInitialLoad: Bool
     @AppStorage(LocalUIStateKey.selectedTab) private var selection = "dashboard"
     private let loadsRemoteData: Bool
     private var unbudgetedCount: Int {
@@ -1576,11 +1577,13 @@ struct ContentView: View {
 
     @MainActor init() {
         _store = StateObject(wrappedValue: MoneyStore())
+        _hasCompletedInitialLoad = State(initialValue: false)
         loadsRemoteData = true
     }
 
     init(store: MoneyStore, loadsRemoteData: Bool) {
         _store = StateObject(wrappedValue: store)
+        _hasCompletedInitialLoad = State(initialValue: !loadsRemoteData)
         self.loadsRemoteData = loadsRemoteData
     }
 
@@ -1593,14 +1596,22 @@ struct ContentView: View {
                 .tag("finances")
             NavigationStack { GoalsView() }.tabItem { Label("Goals", systemImage: "target") }.tag("goals")
             NavigationStack { ScheduleView() }.tabItem { Label("Schedule", systemImage: "calendar") }.tag("routines")
-            NavigationStack { InvestView() }.tabItem { Label("Invest", systemImage: "chart.line.uptrend.xyaxis") }.tag("invest")
+            // Invest tab hidden for now (2026-07-28). Restore this line to bring it back.
+            // NavigationStack { InvestView() }.tabItem { Label("Invest", systemImage: "chart.line.uptrend.xyaxis") }.tag("invest")
         }
         .environmentObject(store)
         .tint(Theme.brand)
         .dynamicTypeSize(.small)
+        .onAppear {
+            // The Invest tab is hidden; don't leave selection stranded on a missing tab.
+            if selection == "invest" { selection = "dashboard" }
+        }
         .task {
             guard loadsRemoteData else { return }
             await store.loadOnLaunch()
+            withAnimation(.easeOut(duration: 0.2)) {
+                hasCompletedInitialLoad = true
+            }
         }
         .onAppear {
             let validTabs = ["dashboard", "finances", "goals", "routines", "invest"]
@@ -1618,13 +1629,32 @@ struct ContentView: View {
             .padding(.trailing, 18).padding(.bottom, 64)
         }
         .overlay {
-            if let goal = store.goalCelebration {
+            if !hasCompletedInitialLoad {
+                AudelLoadingScreen()
+                    .transition(.opacity)
+            } else if let goal = store.goalCelebration {
                 GoalCompletionOverlay(goal: goal)
                     .environmentObject(store)
             }
         }
         .sheet(isPresented: $store.copilotPresented) { CopilotView().environmentObject(store).tint(Theme.brand).dynamicTypeSize(.small).presentationDragIndicator(.visible) }
         .alert("Something went wrong", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) { Button("OK") { store.error = nil } } message: { Text(store.error ?? "") }
+    }
+}
+
+private struct AudelLoadingScreen: View {
+    var body: some View {
+        ZStack {
+            Color("LaunchBackground")
+            Image("AudelLaunchLogo")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 250, height: 250)
+                .accessibilityHidden(true)
+        }
+        .ignoresSafeArea()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Audel is loading")
     }
 }
 
@@ -1766,11 +1796,7 @@ struct DashboardView: View {
             }
             .contentShape(Rectangle())
         } else {
-            SwipeActionRow(actionLabel: "Remove", systemImage: "trash") {
-                removeWidget(id)
-            } content: {
-                DashboardWidget(id: id)
-            }
+            DashboardWidget(id: id)
         }
     }
 
@@ -2093,14 +2119,10 @@ struct LeftToSpendWidget: View {
            let storedBudget = store.budgets.first(where: {
                $0.category == budget.category && $0.period == budget.period
            }) {
-            SwipeActionRow(actionLabel: "Delete", systemImage: "trash") {
-                Task { await store.deleteBudget(storedBudget.id) }
-            } content: {
-                row
-            }
-            .pressAndHoldToEdit {
-                editingBudget = storedBudget
-            }
+            row
+                .pressAndHoldToEdit {
+                    editingBudget = storedBudget
+                }
         } else {
             row
         }
@@ -3163,13 +3185,6 @@ struct TransactionsView: View {
                         .pressAndHoldToEdit(enabled: transaction.isManual) {
                             editingManualTransaction = transaction
                         }
-                        .swipeActions {
-                            if transaction.isManual {
-                                Button("Delete", role: .destructive) {
-                                    Task { await store.deleteTransaction(transaction.id) }
-                                }
-                            }
-                        }
                 }
             }
             .listStyle(.plain)
@@ -3493,6 +3508,7 @@ struct AddTransactionView: View {
     @State private var date = Date()
     @State private var name = ""
     @State private var amount = ""
+    @State private var confirmingDelete = false
     let editingTransaction: Transaction?
 
     init() {
@@ -3530,6 +3546,25 @@ struct AddTransactionView: View {
                 TextField("Description", text: $name)
                 TextField("Amount", text: $amount)
                     .keyboardType(.decimalPad)
+                if let editingTransaction {
+                    Section {
+                        Button("Delete transaction", role: .destructive) { confirmingDelete = true }
+                            .frame(maxWidth: .infinity)
+                    }
+                    .confirmationDialog(
+                        "Delete this transaction?",
+                        isPresented: $confirmingDelete,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Delete transaction", role: .destructive) {
+                            Task {
+                                await store.deleteTransaction(editingTransaction.id)
+                                dismiss()
+                            }
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    }
+                }
             }
             .navigationTitle(editingTransaction == nil ? "Add transaction" : "Edit transaction")
             .toolbar {
@@ -3713,6 +3748,7 @@ struct EditBudgetView: View {
     @State private var limit: String
     @State private var period: String
     @State private var saving = false
+    @State private var confirmingDelete = false
 
     init(budget: Budget) {
         self.budget = budget
@@ -3741,6 +3777,10 @@ struct EditBudgetView: View {
                     Text("Monthly").tag("monthly")
                 }
                 .pickerStyle(.segmented)
+                Section {
+                    Button("Delete budget", role: .destructive) { confirmingDelete = true }
+                        .frame(maxWidth: .infinity)
+                }
             }
             .navigationTitle("Edit budget")
             .navigationBarTitleDisplayMode(.inline)
@@ -3752,6 +3792,19 @@ struct EditBudgetView: View {
                     Button("Save", action: save)
                         .disabled(!canSave)
                 }
+            }
+            .confirmationDialog(
+                "Delete this budget?",
+                isPresented: $confirmingDelete,
+                titleVisibility: .visible
+            ) {
+                Button("Delete budget", role: .destructive) {
+                    Task {
+                        await store.deleteBudget(budget.id)
+                        dismiss()
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
             }
         }
     }

@@ -1,18 +1,11 @@
 from datetime import date, timedelta
 
 import pytest
-from sqlmodel import Session, SQLModel, create_engine
-from sqlmodel.pool import StaticPool
 
 from app.budget.goal_types import period_window
 from app.budget.models import Account, PlaidItem, Transaction
 from app.budget.services import goals as goals_svc
-
-
-def make_session():
-    eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    SQLModel.metadata.create_all(eng)
-    return Session(eng)
+from tests.postgres import make_session
 
 
 def _account(s, **kw):

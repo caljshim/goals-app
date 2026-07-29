@@ -9,7 +9,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # --- budgeting: Plaid + local DB ---
+    # --- budgeting: Plaid + PostgreSQL ---
     plaid_client_id: str = ""
     plaid_secret: str = ""
     plaid_env: str = "sandbox"
@@ -18,7 +18,10 @@ class Settings(BaseSettings):
     # Required by Plaid for OAuth institutions in native iOS Link. Must be an
     # HTTPS Universal Link registered in the Plaid Dashboard.
     plaid_redirect_uri: str = ""
-    database_url: str = "sqlite:///./money.db"
+    database_url: str = "postgresql+psycopg://127.0.0.1:5432/audel"
+    # Optional development gate for exposing the local API through a tunnel.
+    # When set, every /api route except /api/health requires this bearer token.
+    app_api_key: str = ""
 
     # --- investing: tastytrade OAuth. "cert" = sandbox (safe); anything else = production. ---
     tastytrade_env: str = "cert"

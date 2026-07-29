@@ -13,7 +13,11 @@ def assistant_chat(body: ChatRequest, session: Session = Depends(get_session)):
     if not body.messages:
         raise HTTPException(status_code=422, detail="messages must not be empty")
     try:
-        return run_copilot(session, [m.model_dump() for m in body.messages])
+        return run_copilot(
+            session,
+            [m.model_dump() for m in body.messages],
+            timezone_name=body.timezone,
+        )
     except RuntimeError as exc:  # missing API key / config
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # noqa: BLE001 — Anthropic/API failures

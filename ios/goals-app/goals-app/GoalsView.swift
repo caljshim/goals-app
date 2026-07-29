@@ -1,5 +1,117 @@
 import SwiftUI
 import Charts
+import UIKit
+
+private enum GoalFocusLayout {
+    static let coordinateSpace = "goal-focus-space"
+}
+
+private struct FocusedWidgetFramePreferenceKey: PreferenceKey {
+    static var defaultValue: CGRect?
+
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        if let next = nextValue() { value = next }
+    }
+}
+
+extension View {
+    func reportFocusedWidgetFrame(_ isFocused: Bool) -> some View {
+        background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: FocusedWidgetFramePreferenceKey.self,
+                    value: isFocused ? proxy.frame(in: .named(GoalFocusLayout.coordinateSpace)) : nil
+                )
+            }
+        }
+    }
+
+    func pressAndHoldToFocus(enabled: Bool = true, action: @escaping () -> Void) -> some View {
+        modifier(PressAndHoldFocusModifier(enabled: enabled, action: action))
+    }
+
+    func pressAndHoldToEdit(enabled: Bool = true, action: @escaping () -> Void) -> some View {
+        modifier(PressAndHoldFocusModifier(enabled: enabled, action: action))
+    }
+
+    func editableFocusStyle(
+        isFocused: Bool,
+        isDimmed: Bool,
+        cornerRadius: CGFloat,
+        outlineOutset: CGFloat = 0,
+        accent: Color = Theme.brand
+    ) -> some View {
+        modifier(EditableFocusStyle(
+            isFocused: isFocused,
+            isDimmed: isDimmed,
+            cornerRadius: cornerRadius,
+            outlineOutset: outlineOutset,
+            accent: accent
+        ))
+    }
+}
+
+/// Gives focus-mode entry the same tactile press-down and release response used
+/// throughout iOS, plus a light impact when the long press completes.
+struct PressAndHoldFocusModifier: ViewModifier {
+    let enabled: Bool
+    let action: () -> Void
+    @State private var isPressing = false
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content
+                .scaleEffect(isPressing ? 0.975 : 1)
+                .brightness(isPressing ? -0.015 : 0)
+                .animation(.interactiveSpring(response: 0.22, dampingFraction: 0.76), value: isPressing)
+                .onLongPressGesture(
+                    minimumDuration: 0.4,
+                    maximumDistance: 14,
+                    perform: {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        action()
+                    },
+                    onPressingChanged: { pressing in
+                        isPressing = pressing
+                    }
+                )
+        } else {
+            content
+        }
+    }
+}
+
+/// Mirrors the native iOS context-menu lift: the active surface rises above its
+/// surroundings while unrelated content recedes, making its live controls clear.
+private struct EditableFocusStyle: ViewModifier {
+    let isFocused: Bool
+    let isDimmed: Bool
+    let cornerRadius: CGFloat
+    let outlineOutset: CGFloat
+    let accent: Color
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(isFocused ? 1.018 : 1)
+            .opacity(isDimmed ? 0.38 : 1)
+            .saturation(isDimmed ? 0.55 : 1)
+            .shadow(
+                color: Color.black.opacity(isFocused ? 0.18 : 0),
+                radius: isFocused ? 18 : 0,
+                x: 0,
+                y: isFocused ? 9 : 0
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius + outlineOutset, style: .continuous)
+                    .strokeBorder(accent.opacity(isFocused ? 0.8 : 0), lineWidth: 1.5)
+                    .padding(-outlineOutset)
+            }
+            .zIndex(isFocused ? 10 : 0)
+            .animation(.interactiveSpring(response: 0.3, dampingFraction: 0.82), value: isFocused)
+            .animation(.easeOut(duration: 0.18), value: isDimmed)
+    }
+}
 
 struct GoalCategory: Identifiable {
     let id: String
@@ -9,6 +121,7 @@ struct GoalCategory: Identifiable {
     let showsCombinedChart: Bool
 
     var aggregate: Double? {
+        if goals.allSatisfy({ $0.kind == "streak" }) { return nil }
         let measurable = goals.filter { ($0.target ?? 0) != 0 }
         guard !measurable.isEmpty else { return nil }
         let directions = Set(measurable.map(\.direction))
@@ -85,7 +198,7 @@ private func categorizedGoals(from goals: [Goal], idPrefix: String, includeRouti
         result.append(.init(id: "\(idPrefix)-group:\(name)", name: name, icon: "tag.fill",
                             goals: goals.filter { $0.group == name }, showsCombinedChart: true))
     }
-    for cadence in cadences where includeRoutines || cadence.key == "once" {
+    for cadence in cadences where includeRoutines || cadence.key == "once" || cadence.key == "ongoing" {
         let members = goals.filter { goal in
             guard goal.group == nil else { return false }
             return (goal.kind == "streak" ? "ongoing" : goal.period) == cadence.key
@@ -99,7 +212,10 @@ private func categorizedGoals(from goals: [Goal], idPrefix: String, includeRouti
 }
 
 extension Goal {
-    var isRoutine: Bool { kind == "streak" || period != "once" }
+    var isRoutine: Bool { period != "once" }
+    /// Weekly numeric routines are completion checklists, not score targets.
+    /// Financial goals keep their metric-based progress even with a weekly window.
+    var usesScheduledCheckins: Bool { kind == "numeric" && period == "weekly" }
     var isManual: Bool {
         (kind == "save" && accountId == nil) || kind == "numeric"
             || (kind == "financial" && financialSource == "manual")
@@ -129,12 +245,185 @@ extension Goal {
 
 enum WeekdaySchedule {
     static let ordered = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+    static func endDay(whenWeekStartsOn start: String) -> String {
+        guard let index = ordered.firstIndex(of: start) else { return "saturday" }
+        return ordered[(index + ordered.count - 1) % ordered.count]
+    }
+}
+
+enum WeeklyTaskWindow {
+    static func currentWeek(from tasks: [GoalTask], goal: Goal, now: Date = Date()) -> [GoalTask] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: now)
+        let weekdayNumbers = [
+            "sunday": 1, "monday": 2, "tuesday": 3, "wednesday": 4,
+            "thursday": 5, "friday": 6, "saturday": 7
+        ]
+        let currentWeekday = calendar.component(.weekday, from: today)
+        let startWeekday = weekdayNumbers[goal.weeklyResetDay] ?? 1
+        let daysSinceStart = (currentWeekday - startWeekday + 7) % 7
+        guard let start = calendar.date(byAdding: .day, value: -daysSinceStart, to: today),
+              let end = calendar.date(byAdding: .day, value: 6, to: start) else { return [] }
+        let startKey = start.apiDate
+        let endKey = end.apiDate
+        let goalTasks = tasks.filter { $0.goalId == goal.id }
+        var visible = goalTasks.filter {
+            $0.scheduledFor >= startKey && $0.scheduledFor <= endKey
+        }
+
+        // A routine created after one of this cycle's selected days receives the
+        // next occurrence for that weekday from the API. Keep that occurrence on
+        // the board so choosing Sunday + Friday always shows both checkboxes.
+        let representedDays = Set(visible.map { $0.scheduledFor.weekdayName.lowercased() })
+        for weekday in goal.scheduledWeekdays where !representedDays.contains(weekday) {
+            if let next = goalTasks
+                .filter({
+                    $0.scheduledFor > endKey
+                        && $0.scheduledFor.weekdayName.lowercased() == weekday
+                })
+                .min(by: { $0.scheduledFor < $1.scheduledFor }) {
+                visible.append(next)
+            }
+        }
+        return visible.sorted { $0.scheduledFor < $1.scheduledFor }
+    }
+}
+
+/// An Apple Reminders-style week control shared by routine cards and dashboard
+/// widgets. Each occurrence owns a full-width row so multi-day schedules stay
+/// legible without turning the card into a grid of tiny controls.
+struct WeeklyCheckinStrip: View {
+    @EnvironmentObject private var store: MoneyStore
+    let tasks: [GoalTask]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(tasks) { task in
+                Button {
+                    Task { await store.check(task) }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: task.completed ? "checkmark.circle.fill" : "circle")
+                            .font(.title3)
+                            .foregroundStyle(checkinColor(task))
+                        Text(task.scheduledFor.weekdayName)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(titleColor(task))
+                            .strikethrough(task.completed)
+                        Spacer()
+                        Text(statusLabel(task))
+                            .font(.caption.weight(task.missed ? .semibold : .regular))
+                            .foregroundStyle(statusColor(task))
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 40)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(isUpcoming(task))
+                .accessibilityLabel(accessibilityLabel(task))
+                if task.id != tasks.last?.id {
+                    Divider().padding(.leading, 30)
+                }
+            }
+        }
+    }
+
+    private func isUpcoming(_ task: GoalTask) -> Bool {
+        task.scheduledFor > Date().apiDate
+    }
+
+    private func checkinColor(_ task: GoalTask) -> Color {
+        if task.completed { return Theme.brand }
+        if task.missed { return Theme.negative }
+        return Color.secondary
+    }
+
+    private func titleColor(_ task: GoalTask) -> Color {
+        if task.missed { return Theme.negative }
+        if task.completed || isUpcoming(task) { return Color.secondary }
+        return Color.primary
+    }
+
+    private func statusLabel(_ task: GoalTask) -> String {
+        if task.missed { return "Missed" }
+        if task.scheduledFor == Date().apiDate { return "Today" }
+        return task.scheduledFor.monthDay
+    }
+
+    private func statusColor(_ task: GoalTask) -> Color {
+        task.missed ? Theme.negative : Color.secondary
+    }
+
+    private func accessibilityLabel(_ task: GoalTask) -> String {
+        if task.completed { return "Mark \(task.name) incomplete for \(task.scheduledFor.weekdayName)" }
+        if task.missed { return "Complete missed \(task.name) for \(task.scheduledFor.weekdayName)" }
+        if isUpcoming(task) { return "\(task.name) is due \(task.scheduledFor.weekdayName)" }
+        return "Complete \(task.name) for \(task.scheduledFor.weekdayName)"
+    }
+}
+
+/// Reusable weekly performance snapshot for routine details and future dashboard
+/// placements. It intentionally derives from check-ins already in memory.
+struct WeeklyRoutineSummary: View {
+    let tasks: [GoalTask]
+    let reminderTime: String?
+
+    private var completedCount: Int { tasks.filter(\.completed).count }
+    private var missedCount: Int { tasks.count { $0.missed && !$0.completed } }
+    private var progress: Double {
+        tasks.isEmpty ? 0 : Double(completedCount) / Double(tasks.count)
+    }
+    private var nextTask: GoalTask? {
+        tasks.first { !$0.completed && !$0.missed && $0.scheduledFor >= Date().apiDate }
+    }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                Circle().stroke(Theme.brand.opacity(0.13), lineWidth: 6)
+                Circle()
+                    .trim(from: 0, to: progress)
+                    .stroke(Theme.brand, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Text("\(completedCount)/\(tasks.count)")
+                    .font(.caption2.weight(.bold).monospacedDigit())
+            }
+            .frame(width: 54, height: 54)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("This week")
+                    .font(.subheadline.weight(.semibold))
+                Text(summaryText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if missedCount > 0 {
+                    Label("\(missedCount) missed", systemImage: "exclamationmark.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.negative)
+                }
+            }
+            Spacer(minLength: 6)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(completedCount) of \(tasks.count) completed this week. \(summaryText)")
+    }
+
+    private var summaryText: String {
+        if !tasks.isEmpty && completedCount == tasks.count { return "Everything is checked off" }
+        if let nextTask {
+            let time = reminderTime.map { " · \($0.localizedTime)" } ?? ""
+            return "Next: \(nextTask.scheduledFor.weekdayName)\(time)"
+        }
+        if missedCount > 0 { return "Catch up when you’re ready" }
+        return "Nothing else scheduled"
+    }
 }
 
 struct GoalsView: View {
     @EnvironmentObject private var store: MoneyStore
     @State private var adding = false
     @State private var showingHistory = false
+    @State private var focusedWidgetFrame: CGRect?
 
     private var categories: [GoalCategory] { goalCategories(from: store.goals) }
 
@@ -147,6 +436,9 @@ struct GoalsView: View {
             .padding()
         }
         .background(Theme.canvas)
+        .coordinateSpace(name: GoalFocusLayout.coordinateSpace)
+        .onPreferenceChange(FocusedWidgetFramePreferenceKey.self) { focusedWidgetFrame = $0 }
+        .simultaneousGesture(focusDismissGesture)
         .navigationTitle("Goals")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -170,40 +462,80 @@ struct GoalsView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Add goal")
     }
+
+    private var focusDismissGesture: some Gesture {
+        SpatialTapGesture().onEnded { value in
+            guard store.focusedWidgetId != nil,
+                  let focusedWidgetFrame,
+                  !focusedWidgetFrame.contains(value.location) else { return }
+            store.clearFocus()
+        }
+    }
 }
 
-struct RoutinesView: View {
+/// A calendar-day checklist assembled from every routine cadence. Weekly and
+/// monthly routines appear here only when their scheduled occurrence is today.
+struct RoutineTodayWidget: View {
     @EnvironmentObject private var store: MoneyStore
-    @State private var adding = false
-
-    private var categories: [GoalCategory] { routineCategories(from: store.goals) }
+    @State private var editingGoal: GoalEditorSelection?
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 14) {
-                ForEach(categories) { category in GoalCategoryWidget(category: category) }
-                if categories.isEmpty { EmptyWidget(text: "No routines yet") }
-            }.padding()
-        }
-        .background(Theme.canvas)
-        .navigationTitle("Routines")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            if #available(iOS 26.0, *) {
-                ToolbarItemGroup(placement: .navigationBarTrailing) { routinesToolbarButtons }
-                    .sharedBackgroundVisibility(.hidden)
+        WidgetCard("Today's to-do") {
+            if store.todayRoutineTasks.isEmpty {
+                Label("Nothing scheduled today", systemImage: "checkmark.circle")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                ToolbarItemGroup(placement: .navigationBarTrailing) { routinesToolbarButtons }
+                ForEach(store.todayRoutineTasks) { task in
+                    taskRow(task)
+                    if task.id != store.todayRoutineTasks.last?.id { Divider() }
+                }
             }
         }
-        .sheet(isPresented: $adding) { AddGoalView(mode: .routine) }
-        .refreshable { await store.loadGoals() }
+        .sheet(item: $editingGoal) { selection in
+            GoalDetailView(goalId: selection.id)
+                .environmentObject(store)
+                .tint(Theme.brand)
+                .dynamicTypeSize(.small)
+        }
+        .task { await store.loadTodayRoutineTasks() }
     }
 
-    @ViewBuilder private var routinesToolbarButtons: some View {
-        Button { adding = true } label: { Image(systemName: "plus") }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Add routine")
+    private func taskRow(_ task: GoalTask) -> some View {
+        Button {
+            Task { await store.check(task) }
+        } label: {
+            HStack(spacing: 11) {
+                Image(systemName: task.completed ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(task.completed ? Theme.brand : Color.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(task.name)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.primary)
+                        .strikethrough(task.completed)
+                    if task.period != "daily" {
+                        Text(task.period.pretty)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                if let reminderTime = task.reminderTime {
+                    Text(reminderTime.localizedTime)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pressAndHoldToEdit {
+            editingGoal = GoalEditorSelection(id: task.goalId)
+        }
+        .accessibilityLabel("\(task.name), \(task.completed ? "completed" : "not completed"), \(task.period) routine")
+        .accessibilityHint(task.completed ? "Marks this routine incomplete" : "Marks this routine complete")
     }
 }
 
@@ -213,11 +545,10 @@ struct GoalCategoryWidget: View {
     @AppStorage private var expanded: Bool
     @AppStorage private var chartExpanded: Bool
     @State private var addingToGroup = false
-    @State private var renamingGroup = false
-    @State private var renameDraft = ""
     @State private var pickingIcon = false
     @State private var pickingColor = false
     @State private var nameDraft = ""
+    @State private var confirmingEnd = false
 
     init(category: GoalCategory) {
         self.category = category
@@ -226,6 +557,7 @@ struct GoalCategoryWidget: View {
     }
 
     private var focused: Bool { store.isFocused(category.id) }
+    private var dimmed: Bool { store.focusedWidgetId != nil && !focused }
     /// Preserves the pre-focus-mode tint rule (custom color, else the ongoing-streak
     /// honey accent, else brand) so unfocused rendering stays identical to today.
     private var groupAccent: Color {
@@ -234,12 +566,16 @@ struct GoalCategoryWidget: View {
     }
 
     var body: some View {
-        Group {
-            if expanded {
-                categoryCard
-            } else {
-                SwipeActionRow(actionLabel: "End") { endGroup() } content: { categoryCard }
-            }
+        categoryCard
+        .confirmationDialog(
+            "End “\(category.groupName ?? category.name)”?",
+            isPresented: $confirmingEnd,
+            titleVisibility: .visible
+        ) {
+            Button("End group", role: .destructive) { endGroup() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This ends all \(category.goals.count) goals in this group.")
         }
         .sheet(isPresented: $addingToGroup) {
             AddGoalView(
@@ -248,36 +584,25 @@ struct GoalCategoryWidget: View {
                 initialPeriod: category.cadence
             )
         }
-        .alert("Rename group", isPresented: $renamingGroup) {
-            TextField("Group name", text: $renameDraft)
-            Button("Cancel", role: .cancel) {}
-            Button("Save") { renameGroup() }
-                .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        } message: {
-            Text("Every goal in this card will move together under the new name.")
-        }
     }
 
     private var categoryCard: some View {
-        WidgetCard("") { categoryHeader; expandedContent }
-            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(Theme.brand, lineWidth: focused ? 2 : 0))
-            .onLongPressGesture(minimumDuration: 0.4) {
-                nameDraft = category.groupName ?? category.name
-                store.focus(category.id)
-            }
-            .contextMenu {
-                Button { addingToGroup = true } label: {
-                    Label(category.composerMode == .routine ? "Add routine here" : "Add goal here", systemImage: "plus")
+        WidgetCard("", showsShadow: false) {
+            categoryHeader
+                // Once the group is focused, leave the header's buttons in sole
+                // control of their touch area. Keeping the parent long-press
+                // recognizer installed here competes with taps in the icon and
+                // color popovers, making their selections appear unresponsive.
+                .pressAndHoldToFocus(
+                    enabled: category.groupName != nil && !focused
+                ) {
+                    nameDraft = category.groupName ?? category.name
+                    store.focus(category.id)
                 }
-                Button { beginRename() } label: {
-                    Label("Rename group", systemImage: "pencil")
-                }
-                Divider()
-                Button(role: .destructive) { endGroup() } label: {
-                    Label(category.composerMode == .routine ? "End routines" : "End goal group", systemImage: "flag.checkered")
-                }
-            }
+            expandedContent
+        }
+            .editableFocusStyle(isFocused: focused, isDimmed: dimmed, cornerRadius: 20)
+            .reportFocusedWidgetFrame(focused)
     }
 
     /// When focused, the icon/name/gauge become live edit controls, so the header can't
@@ -301,49 +626,48 @@ struct GoalCategoryWidget: View {
                 Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption).foregroundStyle(.secondary)
                 if focused {
                     Button { pickingIcon = true } label: {
-                        IconChip(symbol: category.customIcon.map(Customization.symbol(for:)) ?? category.icon,
-                                 tint: groupAccent)
+                        if let customIcon = category.customIcon {
+                            IconChip(symbol: Customization.symbol(for: customIcon), tint: groupAccent)
+                        } else {
+                            Image(systemName: "plus.circle")
+                                .font(.title3.weight(.medium))
+                                .foregroundStyle(Theme.brand)
+                                .frame(width: 32, height: 32)
+                                .contentShape(Rectangle())
+                        }
                     }
                     .buttonStyle(.plain)
                     .popover(isPresented: $pickingIcon) {
                         IconPickerPopover(selected: category.customIcon,
-                                          defaultIcon: "tag", accent: groupAccent) { token in
+                                          defaultIcon: nil, accent: groupAccent) { token in
                             pickingIcon = false
                             if let name = category.groupName {
                                 Task { await store.setGroupAppearance(name, icon: token, color: category.customColor) }
                             }
                         }
                     }
-                } else {
-                    IconChip(symbol: category.customIcon.map(Customization.symbol(for:)) ?? category.icon,
-                             tint: groupAccent)
+                    .accessibilityLabel(category.customIcon == nil ? "Choose group icon" : "Change group icon")
+                } else if let customIcon = category.customIcon {
+                    IconChip(symbol: Customization.symbol(for: customIcon), tint: groupAccent)
+                } else if category.groupName == nil {
+                    IconChip(symbol: category.icon, tint: groupAccent)
                 }
                 if focused {
                     TextField("Group name", text: $nameDraft)
                         .font(.headline).textFieldStyle(.roundedBorder)
-                        .onSubmit {
-                            Task { _ = await store.renameGoalGroup(category.goals, to: nameDraft) }
-                        }
+                        .onSubmit { commitFocusedName() }
                 } else {
                     Text(category.name).font(.headline)
                 }
                 GoalCountBadge(count: category.goals.count)
                 Spacer()
                 if focused {
-                    Button("Done") { store.clearFocus() }
-                        .font(.caption.weight(.semibold)).foregroundStyle(Theme.brand)
-                }
-                if let aggregate = category.aggregate {
-                    Text("\(aggregate.cleanNumber)%")
-                        .font(.system(.subheadline, design: .rounded).weight(.bold).monospacedDigit())
-                        .foregroundStyle(category.hasGoalOverLimit ? Theme.negative : Theme.brand)
-                }
-            }
-            if let aggregate = category.aggregate {
-                if focused {
                     Button { pickingColor = true } label: {
-                        GaugeBar(pct: aggregate, tint: groupAccent,
-                                 over: category.hasGoalOverLimit, reverse: category.aggregateIsReversed)
+                        Image(systemName: "paintpalette.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(groupAccent)
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .popover(isPresented: $pickingColor) {
@@ -354,10 +678,37 @@ struct GoalCategoryWidget: View {
                             }
                         }
                     }
-                } else {
-                    GaugeBar(pct: aggregate, tint: groupAccent,
-                             over: category.hasGoalOverLimit, reverse: category.aggregateIsReversed)
+                    .accessibilityLabel("Change group color")
+                    Button { addingToGroup = true } label: {
+                        Image(systemName: "plus")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.brand)
+                    .accessibilityLabel(category.composerMode == .routine ? "Add routine to group" : "Add goal to group")
+                    Button(role: .destructive) { confirmingEnd = true } label: {
+                        Image(systemName: "trash")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.negative)
+                    .accessibilityLabel("End group")
+                    Button("Done") { store.clearFocus() }
+                        .font(.caption.weight(.semibold)).foregroundStyle(Theme.brand)
                 }
+                if let aggregate = category.aggregate {
+                    Text("\(aggregate.cleanNumber)%")
+                        .font(.system(.subheadline, design: .rounded).weight(.bold).monospacedDigit())
+                        .foregroundStyle(category.hasGoalOverLimit ? Theme.negative : Theme.brand)
+                }
+            }
+            if let aggregate = category.aggregate {
+                GaugeBar(pct: aggregate, tint: groupAccent,
+                         over: category.hasGoalOverLimit, reverse: category.aggregateIsReversed)
             }
         }
     }
@@ -376,20 +727,29 @@ struct GoalCategoryWidget: View {
         }
     }
 
-    private func beginRename() {
-        renameDraft = category.groupName ?? category.name
-        renamingGroup = true
+    private func commitFocusedName() {
+        performGroupRename(to: nameDraft, clearsFocus: true)
     }
 
-    private func renameGroup() {
-        let cleanName = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanName.isEmpty else { return }
+    private func performGroupRename(to proposedName: String, clearsFocus: Bool) {
+        let cleanName = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty, cleanName.count <= 80 else {
+            if clearsFocus { nameDraft = category.groupName ?? category.name }
+            return
+        }
+        guard cleanName != category.groupName else {
+            if clearsFocus { store.clearFocus() }
+            return
+        }
         Task {
             if await store.renameGoalGroup(category.goals, to: cleanName) {
                 let newId = category.groupWidgetId(named: cleanName)
                 DashboardSettings.replaceWidget(category.id, with: newId)
                 UserDefaults.standard.set(expanded, forKey: LocalUIStateKey.goalCategoryExpanded(newId))
                 UserDefaults.standard.set(chartExpanded, forKey: LocalUIStateKey.goalCategoryChartExpanded(newId))
+                if clearsFocus { store.clearFocus() }
+            } else if clearsFocus {
+                nameDraft = category.groupName ?? category.name
             }
         }
     }
@@ -400,68 +760,6 @@ struct GoalCategoryWidget: View {
                 DashboardSettings.removeWidget(category.id)
             }
         }
-    }
-}
-
-/// Reusable swipe action for editable, user-owned widgets and rows. Bank-backed
-/// finance widgets intentionally remain read-only and do not adopt this component.
-struct SwipeActionRow<Content: View>: View {
-    let actionLabel: String
-    let systemImage: String
-    let cornerRadius: CGFloat
-    let action: () -> Void
-    @ViewBuilder let content: Content
-    @State private var restingOffset: CGFloat = 0
-    @GestureState private var dragOffset: CGFloat = 0
-
-    private let actionWidth: CGFloat = 82
-    private var offset: CGFloat {
-        min(0, max(-actionWidth, restingOffset + dragOffset))
-    }
-
-    init(actionLabel: String, systemImage: String = "flag.checkered", cornerRadius: CGFloat = 20, action: @escaping () -> Void, @ViewBuilder content: () -> Content) {
-        self.actionLabel = actionLabel
-        self.systemImage = systemImage
-        self.cornerRadius = cornerRadius
-        self.action = action
-        self.content = content()
-    }
-
-    var body: some View {
-        ZStack(alignment: .trailing) {
-            Button(role: .destructive) {
-                withAnimation(.easeOut(duration: 0.2)) { restingOffset = 0 }
-                action()
-            } label: {
-                VStack(spacing: 4) {
-                    Image(systemName: systemImage)
-                    Text(actionLabel).font(.caption.weight(.semibold))
-                }
-                .foregroundStyle(.white)
-                .frame(width: actionWidth)
-                .frame(maxHeight: .infinity)
-                .background(Theme.negative)
-            }
-            .buttonStyle(.plain)
-
-            content.offset(x: offset)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 18)
-                .updating($dragOffset) { value, state, _ in
-                    guard abs(value.translation.width) > abs(value.translation.height) else { return }
-                    state = value.translation.width
-                }
-                .onEnded { value in
-                    guard abs(value.translation.width) > abs(value.translation.height) else { return }
-                    let projected = restingOffset + value.predictedEndTranslation.width
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        restingOffset = projected < -actionWidth / 2 ? -actionWidth : 0
-                    }
-                }
-        )
-        .accessibilityAction(named: Text(actionLabel)) { action() }
     }
 }
 
@@ -482,14 +780,26 @@ struct GoalCategoryChart: View {
     var body: some View {
         Chart {
             ForEach(chartGoals) { goal in
-                ForEach(goal.history) { point in
-                    LineMark(x: .value("Date", String(point.at.prefix(10)).monthSlashDay), y: .value("Value", normalized(point.value, goal: goal)))
-                        .foregroundStyle(by: .value("Goal", goal.name)).lineStyle(.init(lineWidth: 2))
+                ForEach(GoalChartTimeline.daily(goal.history)) { point in
+                    LineMark(
+                        x: .value("Date", point.day),
+                        y: .value("Value", normalized(point.value, goal: goal))
+                    )
+                    .foregroundStyle(by: .value("Goal", goal.name))
+                    .lineStyle(.init(lineWidth: 2))
+                    .interpolationMethod(.stepEnd)
                 }
             }
         }
         .chartForegroundStyleScale(range: Theme.chartScale)
         .chartLegend(position: .bottom, spacing: 6)
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 6)) {
+                AxisGridLine()
+                AxisTick()
+                AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+            }
+        }
         .frame(height: 180)
     }
 
@@ -501,69 +811,169 @@ struct GoalCategoryChart: View {
 /// One slim row per goal: name, value, thin gauge. Single tap opens the detail
 /// sheet; on manual goals, double-tap the left half to subtract a step and the
 /// right half to add one.
+struct GoalEditorSelection: Identifiable {
+    let id: Int
+}
+
 struct GoalRow: View {
     @EnvironmentObject private var store: MoneyStore
     let goal: Goal
     @State private var showingDetail = false
 
+    private var accent: Color {
+        goal.groupColor.map(Customization.color(for:))
+            ?? (goal.kind == "streak" ? Theme.honey : Theme.brand)
+    }
+    private var usesScheduledCheckins: Bool { goal.usesScheduledCheckins }
+    private var qualifyingWeeklyStreak: Int? {
+        guard let streak = goal.weeklyStreak, streak >= 3 else { return nil }
+        return streak
+    }
+    private var currentWeekTasks: [GoalTask] {
+        WeeklyTaskWindow.currentWeek(from: store.weekRoutineTasks, goal: goal)
+    }
+
     var body: some View {
-        SwipeActionRow(actionLabel: "End", cornerRadius: 0) {
-            Task { await store.endGoal(goal.id) }
-        } content: {
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
-                        Text(goal.name).font(.subheadline.weight(.medium)).lineLimit(1)
-                        Spacer(minLength: 8)
-                        Text(valueLabel).font(.subheadline.monospacedDigit()).foregroundStyle(.secondary).fitOneLine()
-                    }
-                    if goal.period == "weekly" {
-                        Label(goal.weeklyScheduleLabel.isEmpty ? "No days selected" : goal.weeklyScheduleLabel, systemImage: "calendar")
-                            .font(.caption).foregroundStyle(goal.weeklyScheduleLabel.isEmpty ? Theme.negative : .secondary)
-                    }
-                    if let pct = store.displayedPct(goal) {
-                        GaugeBar(pct: pct, tint: Customization.color(for: goal.resolvedColor),
-                                 over: goal.status == "over", height: 6, reverse: goal.direction == "under")
-                    }
-                }
-                .contentShape(Rectangle())
-                .overlay {
-                    // Only manual goals register double-taps; keeping single-tap off this
-                    // surface is what makes both gestures fire without delay.
-                    if goal.isManual {
-                        HStack(spacing: 0) {
-                            Color.clear.contentShape(Rectangle()).onTapGesture(count: 2) { decrement() }
-                            Color.clear.contentShape(Rectangle()).onTapGesture(count: 2) { increment() }
-                        }
-                    } else {
-                        Color.clear.contentShape(Rectangle()).onTapGesture { showingDetail = true }
-                    }
-                }
-                Button { showingDetail = true } label: {
-                    Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
-                        .frame(width: 26, height: 34).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Details for \(goal.name)")
-            }
-            .padding(.vertical, 4)
-            .background(Theme.card)
-            .contextMenu {
-                Button { showingDetail = true } label: {
-                    Label("Edit goal", systemImage: "pencil")
-                }
-                Button(role: .destructive) {
-                    Task { await store.endGoal(goal.id) }
-                } label: {
-                    Label("End goal", systemImage: "flag.checkered")
-                }
-            }
-        }
+        rowContent
+        .pressAndHoldToEdit { showingDetail = true }
         .sheet(isPresented: $showingDetail) {
             GoalDetailView(goalId: goal.id).environmentObject(store).tint(Theme.brand).dynamicTypeSize(.small)
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityHint(goal.isManual ? "Double-tap left to subtract \(goal.format(goal.step)), right to add it. Use the details button for more." : "Tap for details.")
+        .accessibilityHint(goal.isManual && !usesScheduledCheckins ? "Double-tap left to subtract \(goal.format(goal.step)), right to add it. Use the details button for more." : "Tap for details.")
+        .task {
+            if usesScheduledCheckins { await store.loadTodayRoutineTasks() }
+        }
+    }
+
+    private var rowContent: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(goal.name)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.primary)
+                        .lineLimit(1)
+                    if let streak = qualifyingWeeklyStreak {
+                        Text("🔥 \(streak)")
+                            .font(.caption.weight(.bold).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("\(streak) week streak")
+                    }
+                    Spacer(minLength: 8)
+                    if !usesScheduledCheckins && goal.kind != "streak" {
+                        Text(valueLabel).font(.subheadline.monospacedDigit()).foregroundStyle(.secondary).fitOneLine()
+                    }
+                }
+                if goal.period == "weekly" {
+                    if usesScheduledCheckins {
+                        HStack(spacing: 10) {
+                            if let reminderTime = goal.reminderTime {
+                                Label(reminderTime.localizedTime, systemImage: "clock")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .font(.caption.weight(.medium))
+                    } else {
+                        Label(
+                            (goal.weeklyScheduleLabel.isEmpty ? "No days selected" : goal.weeklyScheduleLabel)
+                                + (goal.reminderTime.map { " · \($0.localizedTime)" } ?? ""),
+                            systemImage: "calendar"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(goal.weeklyScheduleLabel.isEmpty ? Theme.negative : .secondary)
+                    }
+                } else if let reminderTime = goal.reminderTime {
+                    Label(reminderTime.localizedTime, systemImage: "clock")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if usesScheduledCheckins, !currentWeekTasks.isEmpty {
+                    WeeklyCheckinStrip(tasks: currentWeekTasks)
+                }
+                if goal.kind == "streak" { streakSummary }
+                if !usesScheduledCheckins && goal.kind != "streak" { goalGauge }
+            }
+            .contentShape(Rectangle())
+            .overlay {
+                if !usesScheduledCheckins { interactionOverlay }
+            }
+            Button { showingDetail = true } label: {
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                    .frame(width: 26, height: 34).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Details for \(goal.name)")
+        }
+        .padding(.vertical, 4)
+        .background(Theme.card)
+    }
+
+    @ViewBuilder private var goalGauge: some View {
+        if let pct = store.displayedPct(goal) {
+            GaugeBar(pct: pct, tint: accent, over: goal.status == "over",
+                     height: 6, reverse: goal.direction == "under")
+        }
+    }
+
+    private var streakSummary: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle().fill(Theme.honey.opacity(0.16))
+                    Image(systemName: "flame.fill")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(Theme.honey)
+                }
+                .frame(width: 42, height: 42)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text("\(goal.days ?? Int(goal.currentValue))")
+                            .font(.title2.weight(.bold).monospacedDigit())
+                        Text((goal.days ?? Int(goal.currentValue)) == 1 ? "day" : "days")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("Current run")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let best = goal.bestDays {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Label("Best", systemImage: "trophy.fill")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Theme.honey)
+                        Text("\(best) days")
+                            .font(.caption.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if let target = goal.target, let pct = goal.pct {
+                GaugeBar(pct: pct, tint: Theme.honey, height: 5)
+                HStack {
+                    Text(goal.status == "milestone" ? "Milestone reached" : "Next milestone")
+                    Spacer()
+                    Text("\(Int(target)) days")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder private var interactionOverlay: some View {
+        // Only manual goals register double-taps; keeping single-tap off this
+        // surface is what makes both gestures fire without delay.
+        if goal.isManual && !usesScheduledCheckins {
+            HStack(spacing: 0) {
+                Color.clear.contentShape(Rectangle()).onTapGesture(count: 2) { decrement() }
+                Color.clear.contentShape(Rectangle()).onTapGesture(count: 2) { increment() }
+            }
+        } else {
+            Color.clear.contentShape(Rectangle()).onTapGesture { showingDetail = true }
+        }
     }
 
     private func increment() { store.queueAdjust(goal, by: goal.step) }
@@ -586,7 +996,7 @@ struct GoalWidget: View {
 }
 
 /// Everything that used to crowd the goal card lives here: steppers, exact-value
-/// and target editing, history, and milestones. Ending lives on the swipe action.
+/// and target editing, history, and milestones, including ending the goal.
 struct GoalDetailView: View {
     @EnvironmentObject private var store: MoneyStore
     let goalId: Int
@@ -594,66 +1004,108 @@ struct GoalDetailView: View {
     @State private var valueDraft = ""
     @State private var editingStep = false
     @State private var stepDraft = ""
-    @State private var editingWeeklySchedule = false
+    @State private var editingName = false
+    @State private var nameDraft = ""
+    @State private var editingRoutineSchedule = false
     @State private var confirmingStreakReset = false
     @State private var editingTarget = false
     @State private var targetDraft = ""
-    @State private var customizing = false
 
     private var goal: Goal? { store.goals.first { $0.id == goalId } }
+    private var qualifyingWeeklyStreak: Int? {
+        guard let streak = goal?.weeklyStreak, streak >= 3 else { return nil }
+        return streak
+    }
 
     var body: some View {
         if let goal {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(spacing: 10) {
-                        IconChip(symbol: Customization.symbol(for: goal.resolvedIcon), tint: Customization.color(for: goal.resolvedColor))
-                        Text(goal.name).font(.title3.weight(.bold))
-                        Spacer()
-                    }
-                    Button { customizing = true } label: {
-                        Label("Customize appearance", systemImage: "paintpalette")
-                    }.buttonStyle(.bordered).controlSize(.small)
-                    HStack(alignment: .firstTextBaseline, spacing: 7) {
-                        Text(goal.format(store.displayedValue(goal))).font(.heroNumber.monospacedDigit()).fitOneLine()
-                        if let target = goal.target {
-                            Button {
-                                targetDraft = target.editableNumber
-                                editingTarget = true
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Text("\(goal.direction == "under" ? "→ <" : "/") \(goal.format(target))")
-                                    Image(systemName: "pencil").font(.caption2)
-                                }
-                                .font(.subheadline.monospacedDigit())
+                        if editingName {
+                            TextField(goal.isRoutine ? "Routine name" : "Goal name", text: $nameDraft)
+                                .font(.title3.weight(.bold))
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit { commitGoalName(goal) }
+                            Button { commitGoalName(goal) } label: { Image(systemName: "checkmark") }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Save name")
+                            Button { editingName = false } label: { Image(systemName: "xmark") }
+                                .buttonStyle(.plain)
                                 .foregroundStyle(.secondary)
-                                .fitOneLine()
+                                .accessibilityLabel("Cancel name edit")
+                        } else {
+                            Text(goal.name).font(.title3.weight(.bold))
+                            Button {
+                                nameDraft = goal.name
+                                editingName = true
+                            } label: {
+                                Image(systemName: "pencil")
+                                    .font(.caption.weight(.semibold))
                             }
                             .buttonStyle(.plain)
-                            .accessibilityLabel("Edit target, currently \(goal.format(target))")
-                        } else {
-                            Button("Set target") {
-                                targetDraft = ""
-                                editingTarget = true
-                            }
-                            .font(.caption.weight(.medium))
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Rename \(goal.name)")
+                        }
+                        if let streak = qualifyingWeeklyStreak {
+                            Text("🔥 \(streak)")
+                                .font(.subheadline.weight(.bold).monospacedDigit())
+                                .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if let pct = store.displayedPct(goal) { Text("\(pct.formatted())%").font(.subheadline.monospacedDigit()).foregroundStyle(goal.status == "over" ? Theme.negative : .secondary) }
                     }
-                    if goal.isManual { editor(goal) }
-                    if let pct = store.displayedPct(goal) {
-                        GaugeBar(pct: pct, over: goal.status == "over", reverse: goal.direction == "under")
+                    if goal.kind == "streak" { streakDetailHero(goal) }
+                    if !goal.usesScheduledCheckins && goal.kind != "streak" {
+                        HStack(alignment: .firstTextBaseline, spacing: 7) {
+                            Text(goal.format(store.displayedValue(goal))).font(.heroNumber.monospacedDigit()).fitOneLine()
+                            if let target = goal.target {
+                                Button {
+                                    targetDraft = target.editableNumber
+                                    editingTarget = true
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Text("\(goal.direction == "under" ? "→ <" : "/") \(goal.format(target))")
+                                        Image(systemName: "pencil").font(.caption2)
+                                    }
+                                    .font(.subheadline.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                    .fitOneLine()
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Edit target, currently \(goal.format(target))")
+                            } else {
+                                Button("Set target") {
+                                    targetDraft = ""
+                                    editingTarget = true
+                                }
+                                .font(.caption.weight(.medium))
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                            Spacer()
+                            if let pct = store.displayedPct(goal) { Text("\(pct.formatted())%").font(.subheadline.monospacedDigit()).foregroundStyle(goal.status == "over" ? Theme.negative : .secondary) }
+                        }
                     }
-                    metadata(goal)
-                    if goal.period == "weekly" {
-                        Button { editingWeeklySchedule = true } label: {
-                            Label("Edit scheduled days", systemImage: "calendar.badge.clock")
-                        }.buttonStyle(.bordered).controlSize(.small)
+                    if goal.isManual && !goal.usesScheduledCheckins { editor(goal) }
+                    if goal.usesScheduledCheckins { weeklyChecklist(goal) }
+                    if !goal.usesScheduledCheckins && goal.kind != "streak", let pct = store.displayedPct(goal) {
+                        GaugeBar(
+                            pct: pct,
+                            tint: goal.groupColor.map(Customization.color(for:))
+                                ?? (goal.kind == "streak" ? Theme.honey : Theme.brand),
+                            over: goal.status == "over",
+                            reverse: goal.direction == "under"
+                        )
                     }
-                    if !goal.history.isEmpty || !goal.milestones.isEmpty {
+                    if !goal.usesScheduledCheckins { metadata(goal) }
+                    if goal.isRoutine && goal.kind != "streak" && goal.period != "once" {
+                        Button { editingRoutineSchedule = true } label: {
+                            Label("Edit schedule", systemImage: "calendar.badge.clock")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    if !goal.usesScheduledCheckins && (!goal.history.isEmpty || !goal.milestones.isEmpty) {
                         Divider()
                         GoalHistoryChart(goal: goal)
                         milestones(goal)
@@ -667,20 +1119,18 @@ struct GoalDetailView: View {
                         .buttonStyle(.bordered)
                     }
                 }
-                .padding(20)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 20)
+                .padding(.top, 32)
             }
             .background(Theme.canvas)
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
-            .sheet(isPresented: $editingWeeklySchedule) {
-                WeeklyScheduleEditor(goal: goal).environmentObject(store).tint(Theme.brand)
+            .sheet(isPresented: $editingRoutineSchedule) {
+                RoutineScheduleEditor(goal: goal).environmentObject(store).tint(Theme.brand)
             }
-            .sheet(isPresented: $customizing) {
-                IconColorPicker(title: "Goal appearance",
-                                defaultIcon: goal.resolvedIcon,
-                                icon: goal.icon, color: goal.color) { icon, color in
-                    Task { await store.setGoalAppearance(goal, icon: icon, color: color) }
-                }.tint(Theme.brand)
+            .task {
+                if goal.usesScheduledCheckins { await store.loadTodayRoutineTasks() }
             }
             .confirmationDialog(
                 "Reset \(goal.name)?",
@@ -744,6 +1194,87 @@ struct GoalDetailView: View {
         }
     }
 
+    private func streakDetailHero(_ goal: Goal) -> some View {
+        let current = goal.days ?? Int(goal.currentValue)
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 14) {
+                ZStack {
+                    Circle().fill(Theme.honey.opacity(0.2))
+                    Image(systemName: "flame.fill")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(Theme.honey)
+                }
+                .frame(width: 58, height: 58)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        Text("\(current)")
+                            .font(.system(size: 36, weight: .bold, design: .rounded).monospacedDigit())
+                        Text(current == 1 ? "day" : "days")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("and counting")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let best = goal.bestDays {
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Image(systemName: "trophy.fill").foregroundStyle(Theme.honey)
+                        Text("Best \(best)")
+                            .font(.caption.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if let target = goal.target, let pct = goal.pct {
+                VStack(alignment: .leading, spacing: 6) {
+                    GaugeBar(pct: pct, tint: Theme.honey)
+                    HStack {
+                        Text("Next milestone")
+                        Spacer()
+                        Text("\(Int(target)) days")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(16)
+        .background(
+            LinearGradient(
+                colors: [Theme.honey.opacity(0.15), Theme.card],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Theme.honey.opacity(0.2))
+        }
+    }
+
+    @ViewBuilder private func weeklyChecklist(_ goal: Goal) -> some View {
+        let tasks = currentWeekTasks(for: goal)
+        VStack(alignment: .leading, spacing: 12) {
+            if tasks.isEmpty {
+                Text("No more scheduled days this week.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                WeeklyRoutineSummary(tasks: tasks, reminderTime: goal.reminderTime)
+                Divider()
+                WeeklyCheckinStrip(tasks: tasks)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func currentWeekTasks(for goal: Goal) -> [GoalTask] {
+        WeeklyTaskWindow.currentWeek(from: store.weekRoutineTasks, goal: goal)
+    }
+
     private func metadata(_ goal: Goal) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
@@ -754,6 +1285,9 @@ struct GoalDetailView: View {
             }
             if goal.period == "weekly" {
                 Label(goal.weeklyScheduleLabel.isEmpty ? "No scheduled days" : goal.weeklyScheduleLabel, systemImage: "calendar")
+            }
+            if let reminderTime = goal.reminderTime {
+                Label(reminderTime.localizedTime, systemImage: "clock")
             }
         }.font(.caption).foregroundStyle(.secondary)
     }
@@ -779,6 +1313,13 @@ struct GoalDetailView: View {
         guard let value = Double(valueDraft) else { return }
         editingValue = false
         Task { await store.setGoalProgress(goal, current: value) }
+    }
+
+    private func commitGoalName(_ goal: Goal) {
+        let clean = nameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, clean.count <= 80 else { return }
+        editingName = false
+        if clean != goal.name { Task { await store.setGoalName(goal, name: clean) } }
     }
 }
 
@@ -856,21 +1397,13 @@ struct GoalHistoryChart: View {
         )
     }
 
-    private var visibleHistory: [HistoryPoint] {
-        let grouped = Dictionary(grouping: goal.history) { String($0.at.prefix(10)) }
-        let daily = grouped.compactMap { day, points in
-            points.sorted { $0.at < $1.at }.last.map { HistoryPoint(value: $0.value, at: day) }
-        }.sorted { $0.at < $1.at }
+    private var visibleHistory: [GoalChartPoint] {
+        let daily = GoalChartTimeline.daily(goal.history)
         guard let days = selection.wrappedValue.days,
               let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: Date()) else {
             return daily
         }
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        let cutoffKey = formatter.string(from: cutoff)
-        return daily.filter { $0.at >= cutoffKey }
+        return daily.filter { $0.day >= Calendar.current.startOfDay(for: cutoff) }
     }
 
     var body: some View {
@@ -884,13 +1417,16 @@ struct GoalHistoryChart: View {
                 Chart {
                     ForEach(visibleHistory) { point in
                         LineMark(
-                            x: .value("Date", point.at.monthSlashDay),
+                            x: .value("Date", point.day),
                             y: .value("Value", point.value)
                         )
                         .foregroundStyle(Theme.brand)
                         .lineStyle(.init(lineWidth: 2))
+                        .interpolationMethod(.stepEnd)
+                    }
+                    ForEach(visibleHistory.filter(\.isRecorded)) { point in
                         PointMark(
-                            x: .value("Date", point.at.monthSlashDay),
+                            x: .value("Date", point.day),
                             y: .value("Value", point.value)
                         )
                         .foregroundStyle(Theme.brand)
@@ -904,6 +1440,13 @@ struct GoalHistoryChart: View {
                         RuleMark(y: .value("Milestone", milestone.value))
                             .foregroundStyle(Theme.honey)
                             .lineStyle(.init(lineWidth: 1, dash: [3, 3]))
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .automatic(desiredCount: selection.wrappedValue == .week ? 7 : 6)) {
+                        AxisGridLine()
+                        AxisTick()
+                        AxisValueLabel(format: .dateTime.month(.abbreviated).day())
                     }
                 }
                 .frame(height: 170)
@@ -1217,7 +1760,7 @@ struct ArchivedGoalHistoryWidget: View {
     }
 
     var body: some View {
-        WidgetCard("") {
+        WidgetCard("", showsShadow: false) {
             Button { withAnimation { expanded.toggle() } } label: {
                 HStack(spacing: 10) {
                     IconChip(symbol: "flag.checkered", tint: Theme.honey)
@@ -1240,17 +1783,33 @@ struct ArchivedGoalHistoryWidget: View {
                     Text(finalValueLabel).font(.subheadline.weight(.semibold).monospacedDigit())
                 }
                 if !goal.history.isEmpty {
-                    Chart(goal.history) { point in
-                        LineMark(
-                            x: .value("Date", point.at.monthSlashDay),
-                            y: .value("Value", point.value)
-                        )
-                        .foregroundStyle(Theme.brand)
-                        PointMark(
-                            x: .value("Date", point.at.monthSlashDay),
-                            y: .value("Value", point.value)
-                        )
-                        .foregroundStyle(Theme.brand)
+                    let timeline = GoalChartTimeline.dailyThroughStoredEnd(
+                        goal.history,
+                        endedAt: goal.archivedAt
+                    )
+                    Chart {
+                        ForEach(timeline) { point in
+                            LineMark(
+                                x: .value("Date", point.day),
+                                y: .value("Value", point.value)
+                            )
+                            .foregroundStyle(Theme.brand)
+                            .interpolationMethod(.stepEnd)
+                        }
+                        ForEach(timeline.filter(\.isRecorded)) { point in
+                            PointMark(
+                                x: .value("Date", point.day),
+                                y: .value("Value", point.value)
+                            )
+                            .foregroundStyle(Theme.brand)
+                        }
+                    }
+                    .chartXAxis {
+                        AxisMarks(values: .automatic(desiredCount: 6)) {
+                            AxisGridLine()
+                            AxisTick()
+                            AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+                        }
                     }
                     .frame(height: 150)
                 } else {
@@ -1313,27 +1872,64 @@ struct WeekdayPicker: View {
     }
 }
 
-struct WeeklyScheduleEditor: View {
+struct RoutineScheduleEditor: View {
     @EnvironmentObject private var store: MoneyStore
     @Environment(\.dismiss) private var dismiss
     let goal: Goal
     @State private var selection: Set<String>
+    @State private var weekStartsOn: String
+    @State private var hasReminderTime: Bool
+    @State private var reminderTime: Date
+    @State private var repeatUntilCompleted: Bool
+    @State private var nudgeIntervalMinutes: Int
     @State private var saving = false
 
     init(goal: Goal) {
         self.goal = goal
         _selection = State(initialValue: Set(goal.scheduledWeekdays))
+        _weekStartsOn = State(initialValue: goal.weeklyResetDay)
+        _hasReminderTime = State(initialValue: goal.reminderTime != nil)
+        _reminderTime = State(initialValue: Self.parseTime(goal.reminderTime))
+        _repeatUntilCompleted = State(initialValue: goal.repeatUntilCompleted)
+        _nudgeIntervalMinutes = State(initialValue: goal.nudgeIntervalMinutes ?? 60)
     }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Appears on") {
-                    WeekdayPicker(selection: $selection)
-                    Text(summary).font(.caption).foregroundStyle(selection.isEmpty ? Theme.negative : .secondary)
+                if goal.period == "weekly" {
+                    Section("Appears on") {
+                        WeekdayPicker(selection: $selection)
+                        Text(summary).font(.caption).foregroundStyle(selection.isEmpty ? Theme.negative : .secondary)
+                    }
+                    Section("Weekly cycle") {
+                        Picker("Week starts", selection: $weekStartsOn) {
+                            ForEach(WeekdaySchedule.ordered, id: \.self) { day in
+                                Text(day.capitalized).tag(day)
+                            }
+                        }
+                        Text(weekRangeSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Section("Time") {
+                    Toggle("Add a time", isOn: $hasReminderTime)
+                    if hasReminderTime {
+                        DatePicker("Reminder", selection: $reminderTime, displayedComponents: .hourAndMinute)
+                        Toggle("Keep nudging until done", isOn: $repeatUntilCompleted)
+                        if repeatUntilCompleted {
+                            Picker("Nudge every", selection: $nudgeIntervalMinutes) {
+                                Text("30 minutes").tag(30)
+                                Text("1 hour").tag(60)
+                                Text("2 hours").tag(120)
+                                Text("4 hours").tag(240)
+                            }
+                        }
+                    }
                 }
             }
-            .navigationTitle("Weekly schedule")
+            .navigationTitle(goal.period == "weekly" ? "Weekly schedule" : "Routine schedule")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -1342,7 +1938,14 @@ struct WeeklyScheduleEditor: View {
                         saving = true
                         Task {
                             let days = WeekdaySchedule.ordered.filter(selection.contains)
-                            await store.setGoalWeeklyDays(goal, days: days)
+                            await store.setRoutineSchedule(
+                                goal,
+                                days: days,
+                                weekStartsOn: weekStartsOn,
+                                reminderTime: hasReminderTime ? reminderTime.apiTime : nil,
+                                repeatUntilCompleted: hasReminderTime && repeatUntilCompleted,
+                                nudgeIntervalMinutes: repeatUntilCompleted ? nudgeIntervalMinutes : nil
+                            )
                             saving = false
                             dismiss()
                         }
@@ -1355,6 +1958,20 @@ struct WeeklyScheduleEditor: View {
     private var summary: String {
         let days = WeekdaySchedule.ordered.filter(selection.contains)
         return days.isEmpty ? "No scheduled days. This goal will still track weekly, but won’t appear on a specific day." : days.map(\.capitalized).joined(separator: ", ")
+    }
+
+    private var weekRangeSummary: String {
+        let end = WeekdaySchedule.endDay(whenWeekStartsOn: weekStartsOn)
+        return "Your week runs \(weekStartsOn.capitalized) through \(end.capitalized)."
+    }
+
+    private static func parseTime(_ value: String?) -> Date {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        return value.flatMap(formatter.date(from:))
+            ?? Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: Date())
+            ?? Date()
     }
 }
 
@@ -1392,7 +2009,7 @@ struct ColorPickerPopover: View {
 /// mode. `nil` = Default (derive from kind / group). Applies on tap.
 struct IconPickerPopover: View {
     let selected: String?
-    let defaultIcon: String
+    let defaultIcon: String?
     let accent: Color
     let onPick: (String?) -> Void
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 6)
@@ -1411,7 +2028,7 @@ struct IconPickerPopover: View {
 
     @ViewBuilder private func cell(_ token: String?) -> some View {
         Button { onPick(token) } label: {
-            Image(systemName: token.map(Customization.symbol(for:)) ?? Customization.symbol(for: defaultIcon))
+            Image(systemName: iconSymbol(for: token))
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(token == nil ? Color.secondary : accent)
                 .frame(width: 40, height: 40)
@@ -1421,80 +2038,13 @@ struct IconPickerPopover: View {
                     .strokeBorder(Theme.brand, lineWidth: token == selected ? 2 : 0))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(token ?? "Default icon")
-    }
-}
-
-/// Reusable appearance editor for a goal or a group. `nil` icon/color means
-/// "use the default / inherit"; the grids include an explicit Default swatch.
-struct IconColorPicker: View {
-    let title: String
-    let defaultIcon: String
-    @State var icon: String?
-    @State var color: String?
-    let onSave: (_ icon: String?, _ color: String?) -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 6)
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    Text("Color").font(.subheadline.weight(.semibold))
-                    LazyVGrid(columns: columns, spacing: 12) {
-                        swatch(nil)
-                        ForEach(Customization.colorCatalog, id: \.self) { swatch($0) }
-                    }
-                    Text("Icon").font(.subheadline.weight(.semibold))
-                    LazyVGrid(columns: columns, spacing: 12) {
-                        iconCell(nil)
-                        ForEach(Customization.iconCatalog, id: \.self) { iconCell($0) }
-                    }
-                }
-                .padding()
-            }
-            .background(Theme.canvas)
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { onSave(icon, color); dismiss() }
-                }
-            }
-        }
+        .accessibilityLabel(token ?? (defaultIcon == nil ? "No icon" : "Default icon"))
     }
 
-    private var accent: Color { color.map(Customization.color(for:)) ?? Theme.brand }
-
-    @ViewBuilder private func swatch(_ token: String?) -> some View {
-        let selected = token == color
-        Button { color = token } label: {
-            Circle()
-                .fill(token.map(Customization.color(for:)) ?? Color.secondary.opacity(0.25))
-                .frame(width: 34, height: 34)
-                .overlay { if token == nil { Image(systemName: "slash.circle").font(.caption) } }
-                .overlay(Circle().strokeBorder(Theme.brand, lineWidth: selected ? 3 : 0))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(token ?? "Default color")
-    }
-
-    @ViewBuilder private func iconCell(_ token: String?) -> some View {
-        let selected = token == icon
-        Button { icon = token } label: {
-            Image(systemName: token.map(Customization.symbol(for:)) ?? Customization.symbol(for: defaultIcon))
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(token == nil ? Color.secondary : accent)
-                .frame(width: 40, height: 40)
-                .background((token == nil ? Color.secondary : accent).opacity(0.13),
-                            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Theme.brand, lineWidth: selected ? 2 : 0))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(token ?? "Default icon")
+    private func iconSymbol(for token: String?) -> String {
+        if let token { return Customization.symbol(for: token) }
+        if let defaultIcon { return Customization.symbol(for: defaultIcon) }
+        return "slash.circle"
     }
 }
 
@@ -1514,6 +2064,12 @@ struct AddGoalView: View {
     @State private var group = ""
     @State private var category = ""
     @State private var weeklyDays: Set<String> = []
+    @State private var hasReminderTime = false
+    @State private var repeatUntilCompleted = false
+    @State private var nudgeIntervalMinutes = 60
+    @State private var reminderTime = Calendar.current.date(
+        bySettingHour: 9, minute: 0, second: 0, of: Date()
+    ) ?? Date()
     @State private var financialMetric = "account_balance"
     @State private var financialRule = "reach"
     @State private var financialSource = "accounts"
@@ -1534,7 +2090,7 @@ struct AddGoalView: View {
                 Picker("Kind", selection: $kind) {
                     Text("Financial").tag("financial")
                     Text("Numeric").tag("numeric")
-                    if mode == .routine { Text("Streak").tag("streak") }
+                    if mode == .goal { Text("Streak").tag("streak") }
                 }
                 .onChange(of: kind) { selected in
                     if selected == "financial" { period = "once" }
@@ -1555,7 +2111,24 @@ struct AddGoalView: View {
                             .font(.caption).foregroundStyle(weeklyDays.isEmpty ? Theme.negative : .secondary)
                     }
                 }
-                if kind == "numeric" {
+                if mode == .routine && period != "once" && kind != "streak" {
+                    Section("Time") {
+                        Toggle("Add a time", isOn: $hasReminderTime)
+                        if hasReminderTime {
+                            DatePicker("Reminder", selection: $reminderTime, displayedComponents: .hourAndMinute)
+                            Toggle("Keep nudging until done", isOn: $repeatUntilCompleted)
+                            if repeatUntilCompleted {
+                                Picker("Nudge every", selection: $nudgeIntervalMinutes) {
+                                    Text("30 minutes").tag(30)
+                                    Text("1 hour").tag(60)
+                                    Text("2 hours").tag(120)
+                                    Text("4 hours").tag(240)
+                                }
+                            }
+                        }
+                    }
+                }
+                if kind == "numeric" && !isWeeklyChecklistRoutine {
                     Picker("Direction", selection: $direction) {
                         Text("Reach target").tag("reach")
                         Text("Go under target").tag("under")
@@ -1609,16 +2182,18 @@ struct AddGoalView: View {
                         }
                     }
                 }
-                TextField("Target", text: $target).keyboardType(.decimalPad)
-                if kind == "save" || kind == "numeric" {
+                if !isWeeklyChecklistRoutine {
+                    TextField("Target", text: $target).keyboardType(.decimalPad)
+                }
+                if (kind == "save" || kind == "numeric") && !isWeeklyChecklistRoutine {
                     TextField(direction == "under" && kind == "numeric" ? "Starting value (required)" : "Current value", text: $current)
                         .keyboardType(.decimalPad)
                 }
-                if direction == "under" && kind == "numeric" {
+                if direction == "under" && kind == "numeric" && !isWeeklyChecklistRoutine {
                     Text("The starting value is the anchor and must be higher than the target.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if kind == "save" || kind == "numeric" || (kind == "financial" && financialSource == "manual") {
+                if !isWeeklyChecklistRoutine && (kind == "save" || kind == "numeric" || (kind == "financial" && financialSource == "manual")) {
                     TextField("Step", text: $step).keyboardType(.decimalPad)
                 }
                 TextField("Group (optional)", text: $group)
@@ -1631,7 +2206,25 @@ struct AddGoalView: View {
                         Task {
                             let orderedDays = WeekdaySchedule.ordered.filter(weeklyDays.contains)
                             let spendingCategory = category.trimmingCharacters(in: .whitespacesAndNewlines).uppercased().replacingOccurrences(of: " ", with: "_")
-                            await store.addGoal(name: name, kind: kind, period: period, direction: kind == "numeric" ? direction : "reach", target: Double(target), current: Double(current), step: Double(step) ?? 1, group: group.isEmpty ? nil : group, category: spendingCategory.isEmpty ? nil : spendingCategory, weeklyDays: orderedDays, accountIds: selectedAccountIds.sorted(), financialMetric: kind == "financial" ? financialMetric : nil, financialRule: kind == "financial" ? financialRule : nil, financialSource: kind == "financial" ? financialSource : nil)
+                            await store.addGoal(
+                                name: name,
+                                kind: kind,
+                                period: period,
+                                direction: kind == "numeric" && !isWeeklyChecklistRoutine ? direction : "reach",
+                                target: isWeeklyChecklistRoutine ? 1 : Double(target),
+                                current: isWeeklyChecklistRoutine ? 0 : Double(current),
+                                step: isWeeklyChecklistRoutine ? 1 : (Double(step) ?? 1),
+                                group: group.isEmpty ? nil : group,
+                                category: spendingCategory.isEmpty ? nil : spendingCategory,
+                                weeklyDays: orderedDays,
+                                reminderTime: hasReminderTime ? reminderTime.apiTime : nil,
+                                repeatUntilCompleted: hasReminderTime && repeatUntilCompleted,
+                                nudgeIntervalMinutes: repeatUntilCompleted ? nudgeIntervalMinutes : nil,
+                                accountIds: selectedAccountIds.sorted(),
+                                financialMetric: kind == "financial" ? financialMetric : nil,
+                                financialRule: kind == "financial" ? financialRule : nil,
+                                financialSource: kind == "financial" ? financialSource : nil
+                            )
                             dismiss()
                         }
                     }.disabled(!canCreate)
@@ -1642,6 +2235,7 @@ struct AddGoalView: View {
 
     private var canCreate: Bool {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        if isWeeklyChecklistRoutine { return !weeklyDays.isEmpty }
         if kind == "financial" {
             if financialSource == "manual" {
                 if financialRule == "reduce_to" {
@@ -1658,6 +2252,10 @@ struct AddGoalView: View {
             return startingValue > targetValue
         }
         return true
+    }
+
+    private var isWeeklyChecklistRoutine: Bool {
+        mode == .routine && kind == "numeric" && period == "weekly"
     }
 
     private var financialUsesWindow: Bool {

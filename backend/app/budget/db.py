@@ -1,12 +1,27 @@
+from sqlalchemy import inspect
+from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.engine.url import make_url
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.budget.categories import SPENDING_CATEGORIES
 from app.config import get_settings
-from app.budget.models import Budget, Category, GoalGroupSettings
+from app.budget.models import (
+    AgentJob,
+    Budget,
+    CalendarEvent,
+    Category,
+    GoalGroupSettings,
+    Reminder,
+)
 
 settings = get_settings()
-connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-engine = create_engine(settings.database_url, connect_args=connect_args)
+database_url = make_url(settings.database_url)
+if database_url.get_backend_name() != "postgresql":
+    raise RuntimeError(
+        "DATABASE_URL must point to PostgreSQL "
+        "(for example postgresql+psycopg://127.0.0.1:5432/audel)"
+    )
+engine = create_engine(settings.database_url, pool_pre_ping=True)
 
 
 def seed_default_categories(session: Session) -> None:
@@ -21,70 +36,101 @@ def seed_default_categories(session: Session) -> None:
         session.commit()
 
 
-def ensure_schema(eng=engine) -> None:
-    """Additive migrations for databases created before a column was added.
-    SQLModel.metadata.create_all() creates missing tables but never alters existing
-    ones, so an older money.db needs the new columns added by hand. Idempotent."""
+def _column_names(conn: Connection, table_name: str) -> set[str]:
+    inspector = inspect(conn)
+    if not inspector.has_table(table_name):
+        return set()
+    return {column["name"] for column in inspector.get_columns(table_name)}
+
+
+def _add_missing_columns(
+    conn: Connection,
+    table_name: str,
+    definitions: dict[str, str],
+) -> set[str]:
+    if not inspect(conn).has_table(table_name):
+        return set()
+    columns = _column_names(conn, table_name)
+    for column_name, definition in definitions.items():
+        if column_name not in columns:
+            conn.exec_driver_sql(
+                f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {definition}'
+            )
+            columns.add(column_name)
+    return columns
+
+
+def ensure_schema(eng: Engine = engine) -> None:
+    """Apply the small, additive migrations that predate a formal migration tool.
+
+    SQLModel creates missing tables but does not alter existing ones. These
+    migrations intentionally use PostgreSQL metadata and SQL.
+    """
     Budget.__table__.create(eng, checkfirst=True)
     GoalGroupSettings.__table__.create(eng, checkfirst=True)
+    Reminder.__table__.create(eng, checkfirst=True)
+    CalendarEvent.__table__.create(eng, checkfirst=True)
+    AgentJob.__table__.create(eng, checkfirst=True)
     with eng.begin() as conn:
-        # `Budget` moved to a period-aware table so one category can have daily,
-        # weekly, and monthly guardrails. Copy the legacy monthly rows exactly once;
-        # retain the old table as a recovery source.
-        conn.exec_driver_sql(
-            "CREATE TABLE IF NOT EXISTS appmigration (name VARCHAR PRIMARY KEY)"
-        )
-        legacy_budget = conn.exec_driver_sql(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='budget'"
-        ).first()
-        migrated = conn.exec_driver_sql(
-            "SELECT name FROM appmigration WHERE name='period_budgets_v1'"
-        ).first()
-        if legacy_budget and not migrated:
-            conn.exec_driver_sql(
-                """
-                INSERT INTO budgetrule (category, monthly_limit, period)
-                SELECT category, monthly_limit, 'monthly' FROM budget
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM budgetrule
-                    WHERE budgetrule.category = budget.category
-                      AND budgetrule.period = 'monthly'
+        transaction_columns = _add_missing_columns(
+            conn,
+            "transaction",
+            {
+                "reimburses_transaction_id": (
+                    'INTEGER REFERENCES "transaction"(id) ON DELETE SET NULL'
                 )
-                """
-            )
+            },
+        )
+        if "reimburses_transaction_id" in transaction_columns:
             conn.exec_driver_sql(
-                "INSERT INTO appmigration (name) VALUES ('period_budgets_v1')"
+                'CREATE INDEX IF NOT EXISTS ix_transaction_reimburses_transaction_id '
+                'ON "transaction" (reimburses_transaction_id)'
             )
-        cols = {r[1] for r in conn.exec_driver_sql('PRAGMA table_info("transaction")')}
-        if cols and "reimburses_transaction_id" not in cols:
+
+        _add_missing_columns(
+            conn,
+            "plaiditem",
+            {"reconciliation_version": "INTEGER DEFAULT 0"},
+        )
+        account_columns = _add_missing_columns(
+            conn,
+            "account",
+            {"persistent_account_id": "VARCHAR"},
+        )
+        if "persistent_account_id" in account_columns:
             conn.exec_driver_sql(
-                'ALTER TABLE "transaction" ADD COLUMN reimburses_transaction_id INTEGER'
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_account_persistent_account_id "
+                "ON account (persistent_account_id)"
             )
-        gcols = {r[1] for r in conn.exec_driver_sql('PRAGMA table_info("goal")')}
-        if gcols and "period" not in gcols:
-            conn.exec_driver_sql("ALTER TABLE \"goal\" ADD COLUMN period VARCHAR DEFAULT 'once'")
-        if gcols and "period_anchor" not in gcols:
-            conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN period_anchor DATE')
-        if gcols and "direction" not in gcols:
-            conn.exec_driver_sql("ALTER TABLE \"goal\" ADD COLUMN direction VARCHAR DEFAULT 'reach'")
-        if gcols and "step" not in gcols:
-            conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN step FLOAT DEFAULT 1.0')
-        if gcols and "group" not in gcols:
-            conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN "group" VARCHAR')
-        if gcols and "weekly_day" not in gcols:
-            conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN weekly_day VARCHAR')
-        if gcols and "reset_time" not in gcols:
-            conn.exec_driver_sql("ALTER TABLE \"goal\" ADD COLUMN reset_time VARCHAR DEFAULT '00:00'")
-        if gcols and "weekly_reset_day" not in gcols:
-            conn.exec_driver_sql("ALTER TABLE \"goal\" ADD COLUMN weekly_reset_day VARCHAR DEFAULT 'sunday'")
-        if gcols and "monthly_reset_day" not in gcols:
-            conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN monthly_reset_day INTEGER DEFAULT 1')
-        if gcols and "interval_days" not in gcols:
-            conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN interval_days INTEGER')
-        if gcols and "archived_at" not in gcols:
-            conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN archived_at DATETIME')
-        if gcols and "anchor_value" not in gcols:
-            conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN anchor_value FLOAT')
+
+        original_goal_columns = _column_names(conn, "goal")
+        gcols = _add_missing_columns(
+            conn,
+            "goal",
+            {
+                "period": "VARCHAR DEFAULT 'once'",
+                "period_anchor": "DATE",
+                "direction": "VARCHAR DEFAULT 'reach'",
+                "step": "DOUBLE PRECISION DEFAULT 1.0",
+                "group": "VARCHAR",
+                "weekly_day": "VARCHAR",
+                "reminder_time": "VARCHAR",
+                "repeat_until_completed": "BOOLEAN DEFAULT FALSE",
+                "nudge_interval_minutes": "INTEGER",
+                "reset_time": "VARCHAR DEFAULT '00:00'",
+                "weekly_reset_day": "VARCHAR DEFAULT 'sunday'",
+                "monthly_reset_day": "INTEGER DEFAULT 1",
+                "interval_days": "INTEGER",
+                "archived_at": "TIMESTAMP",
+                "anchor_value": "DOUBLE PRECISION",
+                "financial_metric": "VARCHAR",
+                "financial_rule": "VARCHAR",
+                "financial_source": "VARCHAR",
+                "icon": "VARCHAR",
+                "color": "VARCHAR",
+            },
+        )
+        if gcols and "anchor_value" not in original_goal_columns:
             # Older under-goals already have their initial manual value in history.
             # Fall back to the stored current value only when no history exists.
             conn.exec_driver_sql(
@@ -99,16 +145,15 @@ def ensure_schema(eng=engine) -> None:
                 WHERE direction = 'under' AND anchor_value IS NULL
                 """
             )
-        if gcols and "financial_metric" not in gcols:
-            conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN financial_metric VARCHAR')
-        if gcols and "financial_rule" not in gcols:
-            conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN financial_rule VARCHAR')
-        if gcols and "financial_source" not in gcols:
-            conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN financial_source VARCHAR')
-        if gcols and "icon" not in gcols:
-            conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN icon VARCHAR')
-        if gcols and "color" not in gcols:
-            conn.exec_driver_sql('ALTER TABLE "goal" ADD COLUMN color VARCHAR')
+
+        _add_missing_columns(
+            conn,
+            "reminder",
+            {
+                "repeat_until_completed": "BOOLEAN DEFAULT FALSE",
+                "nudge_interval_minutes": "INTEGER",
+            },
+        )
 
         # Spending limits used to be represented as goals. Convert active rows to
         # budget rules, then archive them so their history remains recoverable.
@@ -147,12 +192,14 @@ def ensure_schema(eng=engine) -> None:
             if not normalized or normalized == row[1]:
                 continue
             duplicate = conn.exec_driver_sql(
-                "SELECT id FROM budgetrule WHERE category = ? AND period = ? AND id != ?",
-                (normalized, row[2], row[0]),
+                "SELECT id FROM budgetrule "
+                "WHERE category = %(category)s AND period = %(period)s AND id != %(id)s",
+                {"category": normalized, "period": row[2], "id": row[0]},
             ).first()
             if not duplicate:
                 conn.exec_driver_sql(
-                    "UPDATE budgetrule SET category = ? WHERE id = ?", (normalized, row[0])
+                    "UPDATE budgetrule SET category = %(category)s WHERE id = %(id)s",
+                    {"category": normalized, "id": row[0]},
                 )
 
 

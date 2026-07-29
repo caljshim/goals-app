@@ -33,10 +33,15 @@ SYSTEM = (
     "CADENCE — this matters: set period (once/daily/weekly/monthly) on numeric goals.\n"
     "- A habit or count that REPEATS and resets each period — 'go to church every week', 'work out "
     "3× a week', 'read every day' — is a NUMERIC goal with period=weekly/daily and a per-period "
-    "target (e.g. target 1, period weekly). It resets automatically each period. DO NOT use streak "
+    "target (e.g. target 1, period weekly). A simple recurring task that is either done or not done "
+    "uses target=1. It resets automatically each period. DO NOT use streak "
     "for these; streak is only continuous days-since.\n"
     "- If you (or a prior turn) created the wrong thing, fix it: update_goal can change period, or "
     "delete_goal + create_goal with the right kind/period.\n\n"
+    "ROUTINE NOTIFICATIONS: when a recurring request says to keep reminding, keep nudging, repeat "
+    "until done, or snooze, create/update the recurring numeric goal with reminder_time, "
+    "repeat_until_completed=true, and nudge_interval_minutes. Use 60 minutes when no interval is "
+    "given. This is still a routine, not a one-time reminder.\n\n"
     "Group related goals with a shared `group` name (e.g. '1000 CLUB' for the three big lifts) — the "
     "app shows a rolled-up % for the group. Manual goals hold a `current` value you change with "
     "log_progress (set current, or add a delta); `step` sizes the +/- buttons. raise_goal bumps a "
@@ -62,6 +67,9 @@ TOOLS = [
             "target such as a lift. Spending limits belong in Budgets, not this tool. Provide target for "
             "financial/numeric; period (daily/weekly/monthly/interval) for cadence; weekly_days as a list of "
             "monday-sunday values to schedule a weekly goal on multiple days; group to bundle related goals; "
+            "reminder_time (HH:MM) for an optional local due time; set repeat_until_completed=true "
+            "when the routine should keep nudging until done or snoozed, with a nudge interval "
+            "(defaults to 60 minutes); "
             "current for a manual starting value (required and greater than target when direction=under); "
             "direction reach|under for numeric; since "
             "(YYYY-MM-DD) for a streak start; step for the +/- increment; deadline (YYYY-MM-DD)."
@@ -76,6 +84,9 @@ TOOLS = [
                 "group": {"type": "string"},
                 "period": {"type": "string"},
                 "weekly_days": {"type": "array", "items": {"type": "string"}},
+                "reminder_time": {"type": "string", "description": "Optional local due time in HH:MM format"},
+                "repeat_until_completed": {"type": "boolean"},
+                "nudge_interval_minutes": {"type": "integer", "minimum": 30, "maximum": 1440},
                 "reset_time": {"type": "string"},
                 "weekly_reset_day": {"type": "string"},
                 "monthly_reset_day": {"type": "integer"},
@@ -99,7 +110,9 @@ TOOLS = [
         "description": (
             "Edit an existing goal: name, target, group, deadline, category, and crucially its "
             "cadence — period (once/daily/weekly/monthly), direction (reach/under), or step. Use "
-            "this to fix a goal's period (e.g. make a habit repeat weekly)."
+            "this to fix a goal's period (e.g. make a habit repeat weekly); reminder_time is an "
+            "optional local due time in HH:MM format and is separate from reset_time. Persistent "
+            "routine nudges use repeat_until_completed and nudge_interval_minutes."
         ),
         "input_schema": {
             "type": "object",
@@ -108,6 +121,9 @@ TOOLS = [
                 "group": {"type": "string"}, "deadline": {"type": "string"}, "category": {"type": "string"},
                 "period": {"type": "string"},
                 "weekly_days": {"type": "array", "items": {"type": "string"}},
+                "reminder_time": {"type": "string", "description": "Optional local due time in HH:MM format"},
+                "repeat_until_completed": {"type": "boolean"},
+                "nudge_interval_minutes": {"type": "integer", "minimum": 30, "maximum": 1440},
                 "reset_time": {"type": "string"}, "weekly_reset_day": {"type": "string"},
                 "monthly_reset_day": {"type": "integer"}, "interval_days": {"type": "integer"},
                 "direction": {"type": "string"}, "step": {"type": "number"},
@@ -162,7 +178,7 @@ def _iso(value):
 
 
 def _goal_view(g: dict) -> dict:
-    return {k: g[k] for k in ("id", "name", "kind", "financial_metric", "financial_rule", "financial_source", "account_ids", "current_value", "anchor_value", "target", "pct", "status", "unit", "group", "period", "weekly_days", "reset_time", "weekly_reset_day", "monthly_reset_day", "interval_days")}
+    return {k: g[k] for k in ("id", "name", "kind", "financial_metric", "financial_rule", "financial_source", "account_ids", "current_value", "anchor_value", "target", "pct", "status", "unit", "group", "period", "weekly_days", "reminder_time", "repeat_until_completed", "nudge_interval_minutes", "reset_time", "weekly_reset_day", "monthly_reset_day", "interval_days")}
 
 
 def _list_goals(session: Session) -> tuple[dict, None]:
@@ -171,6 +187,9 @@ def _list_goals(session: Session) -> tuple[dict, None]:
 
 def _create_goal(session: Session, data: dict) -> tuple[dict, str | None]:
     payload = dict(data or {})
+    # Appearance is an explicit user customization. Agent-created goals always
+    # begin without an icon, even if a model emits an undeclared tool argument.
+    payload.pop("icon", None)
     payload["since"] = _iso(payload.get("since"))
     payload["deadline"] = _iso(payload.get("deadline"))
     try:
@@ -183,8 +202,9 @@ def _create_goal(session: Session, data: dict) -> tuple[dict, str | None]:
 def _update_goal(session: Session, data: dict) -> tuple[dict, str | None]:
     gid = data.get("id")
     fields = {k: data[k] for k in ("name", "target", "group", "deadline", "category", "account_ids", "financial_metric", "financial_rule", "financial_source",
-                                   "period", "weekly_days", "reset_time", "weekly_reset_day",
-                                   "monthly_reset_day", "interval_days", "direction", "step") if k in data}
+                                   "period", "weekly_days", "reminder_time", "reset_time", "weekly_reset_day",
+                                   "monthly_reset_day", "interval_days", "repeat_until_completed",
+                                   "nudge_interval_minutes", "direction", "step") if k in data}
     if "deadline" in fields:
         fields["deadline"] = _iso(fields["deadline"])
     goal = goals_svc.update_goal(session, int(gid), fields) if gid is not None else None

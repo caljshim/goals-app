@@ -1,18 +1,16 @@
 from datetime import date
 from types import SimpleNamespace
 
-from sqlmodel import Session, SQLModel, create_engine, select
-from sqlmodel.pool import StaticPool
+from sqlmodel import select
 
 from app.budget.db import seed_default_categories
 from app.budget.models import Budget, Category, Transaction
 from app.budget.services import assistant
+from tests.postgres import make_session_with_accounts as _make_session
 
 
 def make_session():
-    eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    SQLModel.metadata.create_all(eng)
-    s = Session(eng)
+    s = _make_session()
     seed_default_categories(s)  # mirror init_db: DB is the category source of truth
     return s
 

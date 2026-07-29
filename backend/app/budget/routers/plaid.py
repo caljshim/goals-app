@@ -1,4 +1,7 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
+from plaid.exceptions import ApiException
 from sqlmodel import Session, select
 
 from app.budget.db import get_session
@@ -12,14 +15,31 @@ from app.budget.plaid_client import (
 )
 from app.budget.schemas import ExchangeRequest
 from app.budget.services.goals import record_financial_goal_snapshots
-from app.budget.services.sync import sync_item
+from app.budget.services.sync import reconcile_item_duplicates, sync_item
 
 router = APIRouter(prefix="/api", tags=["plaid"])
 
 _ACCOUNT_FIELDS = (
-    "name", "official_name", "type", "subtype", "mask",
+    "persistent_account_id", "name", "official_name", "type", "subtype", "mask",
     "current_balance", "available_balance", "currency",
 )
+_TEMPORARY_REFRESH_CODES = {
+    "INSTITUTION_DOWN",
+    "INSTITUTION_NOT_AVAILABLE",
+    "INSTITUTION_NOT_RESPONDING",
+    "RATE_LIMIT_EXCEEDED",
+}
+
+
+def _plaid_error_code(exc: ApiException) -> str | None:
+    """Extract Plaid's safe error code without returning credentials or tokens."""
+    try:
+        body = exc.body.decode() if isinstance(exc.body, bytes) else exc.body
+        payload = json.loads(body or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        return None
+    code = payload.get("error_code")
+    return code if isinstance(code, str) else None
 
 
 def _relink_match(session: Session, data: dict) -> Account | None:
@@ -29,16 +49,23 @@ def _relink_match(session: Session, data: dict) -> Account | None:
     new Item creates new IDs. A masked account signature lets us preserve local history
     without merging ambiguous or unmasked accounts.
     """
+    persistent_id = data.get("persistent_account_id")
+    if persistent_id:
+        persistent_match = session.exec(
+            select(Account).where(Account.persistent_account_id == persistent_id)
+        ).first()
+        if persistent_match:
+            return persistent_match
+
     if not data.get("mask"):
         return None
-    label = (data.get("official_name") or data["name"]).strip().casefold()
     candidates = [
         account for account in session.exec(select(Account)).all()
         if account.plaid_account_id != "manual-local"
         and account.mask == data["mask"]
         and account.type == data["type"]
         and account.subtype == data.get("subtype")
-        and (account.official_name or account.name).strip().casefold() == label
+        and account.currency == data.get("currency", "USD")
     ]
     return candidates[0] if len(candidates) == 1 else None
 
@@ -51,10 +78,23 @@ def _apply_account_data(account: Account, item_id: int, data: dict) -> None:
 
 
 @router.post("/plaid/link-token")
-def link_token():
+def link_token(item_id: int | None = None, session: Session = Depends(get_session)):
     client = get_client()
     try:
-        return {"link_token": create_link_token(client)}
+        access_token = None
+        if item_id is not None:
+            item = session.get(PlaidItem, item_id)
+            if item is None or not item.access_token:
+                raise HTTPException(status_code=404, detail="Linked bank was not found")
+            access_token = item.access_token
+        token = (
+            create_link_token(client, access_token=access_token)
+            if access_token
+            else create_link_token(client)
+        )
+        return {"link_token": token}
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001 — surface Plaid configuration errors
         raise HTTPException(status_code=502, detail=f"Plaid Link setup failed: {exc}") from exc
 
@@ -113,18 +153,34 @@ def refresh(session: Session = Depends(get_session)):
     if not items:
         raise HTTPException(status_code=400, detail="No bank is linked yet")
     client = get_client()
-    try:
-        for item in items:
+    accepted = 0
+    temporarily_unavailable = 0
+    for item in items:
+        try:
             refresh_transactions(client, item.access_token)
-    except Exception as exc:  # noqa: BLE001 — surface Plaid's reason (e.g. product not enabled)
-        raise HTTPException(status_code=502, detail=f"Plaid refresh failed: {exc}")
-    return {"requested": len(items)}
+            accepted += 1
+        except ApiException as exc:
+            if _plaid_error_code(exc) in _TEMPORARY_REFRESH_CODES:
+                temporarily_unavailable += 1
+                continue
+            raise HTTPException(
+                status_code=502, detail=f"Plaid refresh failed: {exc}"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 — surface unexpected configuration errors
+            raise HTTPException(
+                status_code=502, detail=f"Plaid refresh failed: {exc}"
+            ) from exc
+    return {
+        "requested": len(items),
+        "accepted": accepted,
+        "temporarily_unavailable": temporarily_unavailable,
+    }
 
 
 @router.post("/plaid/sync")
 def sync(session: Session = Depends(get_session)):
     client = get_client()
-    totals = {"added": 0, "modified": 0, "removed": 0}
+    totals = {"added": 0, "modified": 0, "removed": 0, "deduplicated": 0}
     for item in session.exec(select(PlaidItem)).all():
         if not item.access_token:  # local/manual account; never send it to Plaid
             continue
@@ -133,6 +189,8 @@ def sync(session: Session = Depends(get_session)):
                 select(Account).where(Account.plaid_account_id == data["plaid_account_id"])
             ).first()
             if not account:
+                account = _relink_match(session, data)
+            if not account:
                 account = Account(item_id=item.id, **data)
             else:
                 _apply_account_data(account, item.id, data)
@@ -140,6 +198,10 @@ def sync(session: Session = Depends(get_session)):
         session.commit()
         counts = sync_item(session, item, client)
         for k in totals:
-            totals[k] += counts[k]
+            if k in counts:
+                totals[k] += counts[k]
+        session.refresh(item)
+        if item.reconciliation_version < 1:
+            totals["deduplicated"] += reconcile_item_duplicates(session, item, client)
     record_financial_goal_snapshots(session)
     return totals

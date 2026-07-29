@@ -31,7 +31,9 @@ export default function P2PReviewCard({
   const [txns, setTxns] = useState<Transaction[]>([]);
   const [busy, setBusy] = useState(false);
   const [hidden, setHidden] = useState(false);
-  const [linkingId, setLinkingId] = useState<number | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [selectedCategory, setSelectedCategory] = useState("");
+  const [bulkLinking, setBulkLinking] = useState(false);
 
   const load = () =>
     api.getTransactions({ start: monthsAgoStart(2) }).then(setTxns).catch(() => {});
@@ -39,46 +41,68 @@ export default function P2PReviewCard({
 
   const incoming = pendingIncomingZelle(txns);
   const outgoing = pendingOutgoingZelle(txns);
+  const pending = [...incoming, ...outgoing];
+  const selected = pending.filter((transaction) => selectedIds.has(transaction.id));
+  const selectedIncoming = selected.filter((transaction) => incoming.some((row) => row.id === transaction.id));
+  const selectedOutgoing = selected.filter((transaction) => outgoing.some((row) => row.id === transaction.id));
   const categories = spendingCategories(txns);
 
-  // Set user_category (a spending bucket, or TRANSFER_IN/OUT to keep as a transfer).
-  const resolve = async (id: number, category: string) => {
-    if (busy) return;
+  const finishBulkChange = async () => {
+    setSelectedIds(new Set());
+    setSelectedCategory("");
+    setBulkLinking(false);
+    await load();
+    onChange?.();
+  };
+
+  const resolveSelected = async (category: string) => {
+    if (busy || selected.length === 0) return;
     setBusy(true);
     try {
-      await api.updateTransaction(id, category);
-      await load();
-      onChange?.();
+      await api.bulkUpdateTransactions(selected.map((transaction) => transaction.id), category);
+      await finishBulkChange();
     } finally {
       setBusy(false);
     }
   };
 
-  const link = async (id: number, targetId: number) => {
-    if (busy) return;
+  const linkSelected = async (targetId: number) => {
+    if (busy || selectedIncoming.length === 0) return;
     setBusy(true);
     try {
-      await api.linkReimbursement(id, targetId);
-      setLinkingId(null);
-      await load();
-      onChange?.();
+      await api.bulkLinkReimbursements(
+        selectedIncoming.map((transaction) => transaction.id),
+        targetId,
+      );
+      await finishBulkChange();
     } finally {
       setBusy(false);
     }
   };
 
-  const keepAll = async () => {
-    if (busy) return;
+  const keepSelectedAsTransfers = async () => {
+    if (busy || selected.length === 0) return;
     setBusy(true);
     try {
-      // serial: concurrent SQLite writes can hit "database is locked"
-      for (const t of outgoing) await api.updateTransaction(t.id, "TRANSFER_OUT");
-      for (const t of incoming) await api.updateTransaction(t.id, "TRANSFER_IN");
-      await load();
-      onChange?.();
+      if (selectedOutgoing.length) {
+        await api.bulkUpdateTransactions(selectedOutgoing.map((transaction) => transaction.id), "TRANSFER_OUT");
+      }
+      if (selectedIncoming.length) {
+        await api.bulkUpdateTransactions(selectedIncoming.map((transaction) => transaction.id), "TRANSFER_IN");
+      }
+      await finishBulkChange();
     } finally {
       setBusy(false);
     }
+  };
+
+  const toggleSelected = (id: number) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   };
 
   if (hidden && !embedded) return null;
@@ -116,45 +140,20 @@ export default function P2PReviewCard({
               reimbursement so it does not change spending.
             </p>
             {incoming.map((t) => (
-              <div key={t.id} className="text-xs border border-slate-100 rounded-lg px-2 py-1.5">
-                <div className="flex items-start justify-between gap-2">
+              <button key={t.id} type="button" onClick={() => toggleSelected(t.id)} disabled={busy}
+                className={`w-full text-left text-xs rounded-lg border px-2 py-1.5 ${
+                  selectedIds.has(t.id) ? "border-emerald-400 bg-emerald-50" : "border-slate-100"
+                }`}>
+                <div className="flex items-start gap-2">
+                  <span className={selectedIds.has(t.id) ? "text-emerald-600" : "text-slate-300"}>
+                    {selectedIds.has(t.id) ? "●" : "○"}
+                  </span>
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-slate-700">{t.name}</div>
                     <div className="text-emerald-600">{formatDateFull(t.date)} · {formatCurrency(t.amount)}</div>
                   </div>
                 </div>
-                <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                  <button
-                    onClick={() => setLinkingId(linkingId === t.id ? null : t.id)}
-                    disabled={busy}
-                    className="shrink-0 whitespace-nowrap text-slate-600 hover:text-slate-900"
-                  >
-                    {linkingId === t.id ? "Close" : "Link expense"}
-                  </button>
-                  <select
-                    defaultValue=""
-                    disabled={busy}
-                    onChange={(e) => { if (e.target.value) resolve(t.id, e.target.value); }}
-                    className="w-32 shrink-0 rounded border px-1 py-1"
-                    title="Apply this reimbursement to a budget category"
-                  >
-                    <option value="" disabled>Choose budget…</option>
-                    {categories.map((c) => <option key={c} value={c}>{prettifyCategory(c)}</option>)}
-                  </select>
-                  <button onClick={() => resolve(t.id, "TRANSFER_IN")} disabled={busy}
-                    title="Exclude this payment from spending and budget calculations"
-                    className="shrink-0 whitespace-nowrap text-slate-500 hover:text-slate-700">
-                    Not a reimbursement
-                  </button>
-                </div>
-                {linkingId === t.id && (
-                  <ExpensePicker
-                    expenses={txns}
-                    onPick={(eid) => link(t.id, eid)}
-                    onCancel={() => setLinkingId(null)}
-                  />
-                )}
-              </div>
+              </button>
             ))}
           </div>
         )}
@@ -167,42 +166,70 @@ export default function P2PReviewCard({
               out of spending totals.
             </p>
             {outgoing.map((t) => (
-              <div key={t.id} className="rounded-lg border border-slate-100 px-2 py-1.5 text-xs">
-                <div className="flex items-start justify-between gap-2">
+              <button key={t.id} type="button" onClick={() => toggleSelected(t.id)} disabled={busy}
+                className={`w-full rounded-lg border px-2 py-1.5 text-left text-xs ${
+                  selectedIds.has(t.id) ? "border-emerald-400 bg-emerald-50" : "border-slate-100"
+                }`}>
+                <div className="flex items-start gap-2">
+                  <span className={selectedIds.has(t.id) ? "text-emerald-600" : "text-slate-300"}>
+                    {selectedIds.has(t.id) ? "●" : "○"}
+                  </span>
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-slate-700">{t.name}</div>
                     <div className="text-slate-400">{formatDateFull(t.date)} · {formatCurrency(t.amount)}</div>
                   </div>
                 </div>
-                <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                  <select
-                    defaultValue=""
-                    disabled={busy}
-                    onChange={(e) => { if (e.target.value) resolve(t.id, e.target.value); }}
-                    className="w-40 shrink-0 rounded border px-1 py-1"
-                  >
-                    <option value="" disabled>Choose category…</option>
-                    {categories.map((c) => (
-                      <option key={c} value={c}>{prettifyCategory(c)}</option>
-                    ))}
-                  </select>
-                  <button onClick={() => resolve(t.id, "TRANSFER_OUT")} disabled={busy}
-                    title="Exclude this payment from spending and budget calculations"
-                    className="shrink-0 whitespace-nowrap text-slate-500 hover:text-slate-700">
-                    Not spending
-                  </button>
-                </div>
-              </div>
+              </button>
             ))}
           </div>
         )}
       </div>
 
-      <div className="px-4 py-2 border-t border-slate-200 text-right">
-        <button onClick={keepAll} disabled={busy}
-          className="text-xs text-slate-500 hover:text-slate-700">
-          {busy ? "Saving…" : "Mark all reviewed — no spending changes"}
-        </button>
+      <div className="space-y-2 border-t border-slate-200 px-4 py-2">
+        <div className="flex items-center justify-between text-xs">
+          <button onClick={() => setSelectedIds(
+            selected.length === pending.length ? new Set() : new Set(pending.map((transaction) => transaction.id)),
+          )} disabled={busy} className="font-medium text-slate-600 hover:text-slate-900">
+            {selected.length === pending.length ? "Clear selection" : "Select all"}
+          </button>
+          <span className="text-slate-400">{selected.length} selected</span>
+        </div>
+        {selected.length > 0 && (
+          <>
+            <div className="flex items-center gap-2">
+              <select value={selectedCategory} disabled={busy}
+                onChange={(event) => setSelectedCategory(event.target.value)}
+                className="min-w-0 flex-1 rounded border px-2 py-1 text-xs">
+                <option value="">Choose category…</option>
+                {categories.map((category) => (
+                  <option key={category} value={category}>{prettifyCategory(category)}</option>
+                ))}
+              </select>
+              <button onClick={() => resolveSelected(selectedCategory)}
+                disabled={busy || !selectedCategory}
+                className="rounded bg-slate-900 px-2 py-1 text-xs text-white disabled:opacity-40">
+                Apply
+              </button>
+              {selectedIncoming.length === selected.length && (
+                <button onClick={() => setBulkLinking((open) => !open)} disabled={busy}
+                  className="whitespace-nowrap text-xs font-medium text-slate-600 hover:text-slate-900">
+                  Link expense
+                </button>
+              )}
+            </div>
+            <button onClick={keepSelectedAsTransfers} disabled={busy}
+              className="text-xs text-slate-500 hover:text-slate-700">
+              {busy ? "Saving…" : "Mark selected as transfers"}
+            </button>
+            {bulkLinking && selectedIncoming.length === selected.length && (
+              <ExpensePicker
+                expenses={txns}
+                onPick={linkSelected}
+                onCancel={() => setBulkLinking(false)}
+              />
+            )}
+          </>
+        )}
       </div>
     </div>
   );

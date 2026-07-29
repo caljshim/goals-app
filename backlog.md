@@ -8,3 +8,4 @@
 - Compare completion speed only among users with sufficiently similar goal types and difficulty ranges.
 - Require a privacy-safe minimum cohort size before showing comparisons with other users.
 - Fall back to a personal completion statistic whenever a trustworthy cohort comparison is unavailable.
+- Restore optional per-goal icon, color, and inline focus-mode customization after the group editing experience is settled.

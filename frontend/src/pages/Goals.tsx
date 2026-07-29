@@ -15,7 +15,7 @@ const ICON: Record<GoalKind, string> = { save: "🎯", spend_cap: "🧾", financ
 const PERIOD_LABEL: Record<GoalPeriod, string> = { once: "", daily: "today", weekly: "this week", monthly: "this month", interval: "on its interval" };
 const WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"] as const;
 
-// Dashboard sections, in order. Continuous routine tracking lives under Streaks.
+// Dashboard sections, in order. Continuous streak outcomes live under Goals.
 const SECTIONS: { key: string; label: string }[] = [
   { key: "daily", label: "Daily" },
   { key: "weekly", label: "Weekly" },
@@ -282,25 +282,35 @@ export default function Goals({ mode = "goals" }: { mode?: GoalCollectionMode })
             </div>
           </div>
         ) : g.kind === "streak" ? (
-          <div>
-            <div className="flex items-baseline gap-2">
-              <span className="text-3xl font-bold">{g.days}</span>
-              <span className="text-slate-500 text-sm">{g.days === 1 ? "day" : "days"}</span>
-              <span className="ml-auto text-xs text-slate-400">best: {g.best_days}</span>
+          <div className="rounded-2xl border border-amber-200/70 bg-gradient-to-br from-amber-50 to-white p-4">
+            <div className="flex items-center gap-3">
+              <div className="grid h-12 w-12 place-items-center rounded-full bg-amber-100 text-2xl">🔥</div>
+              <div>
+                <div className="flex items-baseline gap-1.5">
+                  <span className="text-3xl font-bold tracking-tight">{g.days}</span>
+                  <span className="text-sm font-medium text-slate-500">{g.days === 1 ? "day" : "days"}</span>
+                </div>
+                <div className="text-xs text-slate-400">and counting</div>
+              </div>
+              <div className="ml-auto text-right text-xs text-slate-400">
+                <div className="text-amber-600">🏆 Best</div>
+                <div className="font-semibold text-slate-600">{g.best_days} days</div>
+              </div>
             </div>
             {g.target != null && (
               <>
-                <div className="h-2 bg-slate-100 rounded-full overflow-hidden my-2">
-                  <div className={`h-full ${g.status === "milestone" ? "bg-emerald-500" : "bg-sky-500"}`}
+                <div className="my-3 h-2 overflow-hidden rounded-full bg-amber-100">
+                  <div className="h-full bg-amber-500"
                     style={{ width: `${Math.min(g.pct ?? 0, 100)}%` }} />
                 </div>
-                <div className="text-xs text-slate-500">
-                  {g.status === "milestone" ? "🎉 milestone reached" : `milestone: ${g.target} days`}
+                <div className="flex justify-between text-xs text-slate-500">
+                  <span>{g.status === "milestone" ? "Milestone reached 🎉" : "Next milestone"}</span>
+                  <span>{g.target} days</span>
                 </div>
               </>
             )}
             <button onClick={() => reset(g)}
-              className="mt-2 text-xs text-slate-500 hover:text-slate-700 border border-slate-200 rounded px-2 py-1">
+              className="mt-3 text-xs text-slate-500 hover:text-slate-700">
               ↺ I slipped — reset
             </button>
           </div>
@@ -446,7 +456,7 @@ export default function Goals({ mode = "goals" }: { mode?: GoalCollectionMode })
               setForm((f) => ({ ...f, kind, period }));
             }}
             className="border rounded px-2 py-1 text-sm">
-            {KINDS.filter((k) => mode === "routines" || k.value === "financial" || k.value === "numeric")
+            {KINDS.filter((k) => mode === "routines" ? k.value !== "streak" : true)
               .map((k) => <option key={k.value} value={k.value}>{k.icon} {k.label}</option>)}
           </select>
         </label>

@@ -25,7 +25,7 @@
 - The copilot/agents must never execute a trade without an explicit user confirmation step.
 
 ## Structure
-- Backend: FastAPI + SQLite in `backend/` (venv at `backend/.venv`), port 8100.
+- Backend: FastAPI + PostgreSQL 18 in `backend/` (venv at `backend/.venv`), port 8100.
   - `app/budget/` — Plaid budgeting: models, db, categories, plaid_client, schemas,
     `routers/`, `services/` (incl. the budgeting specialist `services/assistant.py`).
   - `app/invest/` — tastytrade read-only: `tasty.py`, `portfolio.py` (router),
@@ -37,7 +37,8 @@
 - Frontend: React + Vite in `frontend/`, port 5273 (proxy targets 127.0.0.1:8100 —
   keep IPv4, `localhost` breaks on Windows). Tabs: Dashboard/Transactions/Accounts/
   Budgets/Invest, plus one `CopilotChat` sidebar.
-- User data lives in `backend/money.db` (git-ignored).
+- User data lives in the PostgreSQL database selected by `DATABASE_URL` (`audel`
+  locally).
 
 ## General
 - Prefer minimal, focused edits over broad refactors. Keep the budgeting and investing

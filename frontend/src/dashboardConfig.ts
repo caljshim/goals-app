@@ -13,6 +13,8 @@ export type StaticDashboardWidgetId =
   | "account-sync"
   | "budget-progress"
   | "budget-form"
+  | "schedule-calendar"
+  | "schedule-today"
   | "portfolio-summary"
   | "portfolio-positions";
 
@@ -45,7 +47,7 @@ export const DEFAULT_DASHBOARD_WIDGETS: DashboardWidgetId[] = [
 export const DASHBOARD_WIDGETS: {
   id: StaticDashboardWidgetId;
   label: string;
-  source: "Finances" | "Goals" | "Routines" | "Invest";
+  source: "Finances" | "Goals" | "Schedule" | "Invest";
   description: string;
 }[] = [
   { id: "left-to-spend", label: "Left to spend", source: "Finances", description: "Current budget remaining by category." },
@@ -62,6 +64,8 @@ export const DASHBOARD_WIDGETS: {
   { id: "account-sync", label: "Account sync", source: "Finances", description: "Connect a bank or sync transactions." },
   { id: "budget-progress", label: "Budget progress", source: "Finances", description: "Monthly category budget progress bars." },
   { id: "budget-form", label: "Add budget", source: "Finances", description: "Create a new monthly category budget." },
+  { id: "schedule-calendar", label: "Calendar", source: "Schedule", description: "Routines, reminders, and goal deadlines by day." },
+  { id: "schedule-today", label: "Today's schedule", source: "Schedule", description: "Everything scheduled for today." },
   { id: "portfolio-summary", label: "Portfolio summary", source: "Invest", description: "Account value, cash, and buying power." },
   { id: "portfolio-positions", label: "Portfolio positions", source: "Invest", description: "Open investment positions." },
 ];
@@ -85,9 +89,10 @@ export function normalizeDashboardWidgets(ids: unknown): DashboardWidgetId[] {
   for (const rawId of ids) {
     if (typeof rawId !== "string") continue;
     let id = rawId;
-    if (/^goal-section:(daily|weekly|monthly|interval|ongoing)$/.test(id)) {
+    if (/^goal-section:(daily|weekly|monthly|interval)$/.test(id)) {
       id = id.replace("goal-section:", "routine-section:");
     }
+    if (id === "routine-section:ongoing") id = "goal-section:ongoing";
     if (!isDashboardWidgetId(id)) continue;
     if (!seen.has(id)) {
       seen.add(id);
@@ -95,6 +100,22 @@ export function normalizeDashboardWidgets(ids: unknown): DashboardWidgetId[] {
     }
   }
   return out;
+}
+
+/**
+ * Move the widget at `fromIndex` so it lands at `insertionIndex`, where
+ * `insertionIndex` is expressed in the ORIGINAL array's coordinates (0 = before
+ * the first card, list.length = after the last). This is what a drag "drop gap"
+ * naturally reports, so callers can pass it straight through. Returns the list
+ * unchanged for out-of-range sources or a no-op move.
+ */
+export function reorderWidgets<T>(list: T[], fromIndex: number, insertionIndex: number): T[] {
+  if (fromIndex < 0 || fromIndex >= list.length) return list;
+  const next = list.slice();
+  const [moved] = next.splice(fromIndex, 1);
+  const target = insertionIndex > fromIndex ? insertionIndex - 1 : insertionIndex;
+  next.splice(Math.max(0, Math.min(target, next.length)), 0, moved);
+  return next;
 }
 
 export function readDashboardWidgets(): DashboardWidgetId[] {

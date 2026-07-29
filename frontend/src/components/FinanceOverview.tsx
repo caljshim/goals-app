@@ -114,18 +114,18 @@ export default function FinanceOverview({
   const transactionsForBudget = (budget: BudgetProgress) => monthTxns.filter(
     (transaction) => transaction.date >= budget.window_start && transaction.date <= budget.window_end);
   const merchantsFor = (budget: BudgetProgress) => {
-    const byMerchant = new Map<string, { total: number; count: number; last: string }>();
+    const byMerchant = new Map<string, { total: number; dates: Set<string>; last: string }>();
     for (const t of transactionsForBudget(budget)) {
       if (t.effective_category !== budget.category || t.amount < 0) continue;
       const k = t.merchant_name ?? t.name;
-      const g = byMerchant.get(k) ?? { total: 0, count: 0, last: "" };
+      const g = byMerchant.get(k) ?? { total: 0, dates: new Set<string>(), last: "" };
       g.total += t.amount;
-      g.count += 1;
+      g.dates.add(t.date);
       if (t.date > g.last) g.last = t.date; // ISO strings compare chronologically
       byMerchant.set(k, g);
     }
     return [...byMerchant.entries()]
-      .map(([name, g]) => ({ name, ...g }))
+      .map(([name, g]) => ({ name, total: g.total, count: g.dates.size, last: g.last }))
       .sort((a, b) => b.total - a.total);
   };
 
@@ -210,7 +210,14 @@ export default function FinanceOverview({
                   ))}
                   {reimbursements.map((r) => (
                     <div key={`r${r.id}`} className="flex justify-between gap-2 text-xs text-emerald-700 py-0.5">
-                      <span className="truncate">↩ {r.merchant_name ?? r.name}</span>
+                      <span className="min-w-0">
+                        <span className="block truncate">↩ {r.merchant_name ?? r.name}</span>
+                        {r.reimburses_transaction_id == null && (
+                          <span className="block truncate text-[11px] text-slate-400">
+                            Applied to {prettifyCategory(b.category)}
+                          </span>
+                        )}
+                      </span>
                       <span className="shrink-0">
                         <span className="text-slate-400">{shortDate(r.date)}</span>
                         {" · "}{formatCurrency(r.amount)}

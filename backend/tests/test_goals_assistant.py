@@ -1,16 +1,9 @@
 from types import SimpleNamespace
 
-from sqlmodel import Session, SQLModel, create_engine
-from sqlmodel.pool import StaticPool
-
+from app.budget.models import Goal
 from app.budget.services import goals as goals_svc
 from app.budget.services import goals_assistant as ga
-
-
-def make_session():
-    eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    SQLModel.metadata.create_all(eng)
-    return Session(eng)
+from tests.postgres import make_session
 
 
 def test_create_goal_tool_makes_a_numeric_gym_goal_in_a_group():
@@ -21,6 +14,18 @@ def test_create_goal_tool_makes_a_numeric_gym_goal_in_a_group():
     assert action and "Bench press" in action
     g = goals_svc.list_with_progress(s)[0]
     assert g["name"] == "Bench press" and g["current_value"] == 275.0 and g["group"] == "1000 CLUB"
+
+
+def test_create_goal_tool_never_assigns_an_icon():
+    s = make_session()
+    created, _ = ga._create_goal(
+        s,
+        {"name": "Bench press", "kind": "numeric", "target": 315, "icon": "dumbbell"},
+    )
+
+    goal = s.get(Goal, created["created"])
+    assert goal is not None
+    assert goal.icon is None
 
 
 def test_list_goals_tool_returns_trimmed_view():
@@ -57,6 +62,22 @@ def test_create_weekly_numeric_goal_via_agent():
     ga._create_goal(s, {"name": "Go to church", "kind": "numeric", "target": 1, "period": "weekly"})
     g = goals_svc.list_with_progress(s)[0]
     assert g["kind"] == "numeric" and g["period"] == "weekly"
+
+
+def test_agent_can_create_a_persistent_daily_routine():
+    s = make_session()
+    created, _ = ga._create_goal(s, {
+        "name": "Take vitamins",
+        "kind": "numeric",
+        "target": 1,
+        "period": "daily",
+        "reminder_time": "09:00",
+        "repeat_until_completed": True,
+    })
+    goal = goals_svc.list_with_progress(s)[0]
+    assert created["created"] == goal["id"]
+    assert goal["repeat_until_completed"] is True
+    assert goal["nudge_interval_minutes"] == 60
 
 
 def test_update_goal_tool_can_change_period():
