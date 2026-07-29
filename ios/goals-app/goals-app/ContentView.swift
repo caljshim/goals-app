@@ -1599,7 +1599,13 @@ struct ContentView: View {
                     .navigationTitle("Audel")
                     .navigationBarTitleDisplayMode(.inline)
             }
-            .tabItem { Label("Audel", systemImage: "a.circle.fill") }
+            .tabItem {
+                Label {
+                    Text("Audel")
+                } icon: {
+                    Image(uiImage: AudelTabIcon.image)
+                }
+            }
             .tag("audel")
             NavigationStack { GoalsView() }.tabItem { Label("Goals", systemImage: "target") }.tag("goals")
             NavigationStack { ScheduleView() }.tabItem { Label("Schedule", systemImage: "calendar") }.tag("routines")
@@ -1631,6 +1637,22 @@ struct ContentView: View {
         }
         .alert("Something went wrong", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) { Button("OK") { store.error = nil } } message: { Text(store.error ?? "") }
     }
+}
+
+private enum AudelTabIcon {
+    static let image: UIImage = {
+        guard let source = UIImage(named: "AudelLaunchLogo") else {
+            return UIImage(systemName: "sparkles") ?? UIImage()
+        }
+        let size = CGSize(width: 30, height: 30)
+        let rendered = UIGraphicsImageRenderer(size: size).image { _ in
+            // The source PNG has generous transparent padding for launch-screen
+            // use. Drawing beyond this small canvas crops that padding while
+            // preserving the complete Audel mark at native tab-bar scale.
+            source.draw(in: CGRect(x: -10, y: -10, width: 50, height: 50))
+        }
+        return rendered.withRenderingMode(.alwaysTemplate)
+    }()
 }
 
 private struct AudelLoadingScreen: View {
