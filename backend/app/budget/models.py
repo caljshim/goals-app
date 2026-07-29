@@ -123,6 +123,7 @@ class Goal(SQLModel, table=True):
     weekly_day: Optional[str] = None  # preferred day: monday | ... | sunday
     reminder_time: Optional[str] = None  # optional local due time, HH:MM
     repeat_until_completed: bool = Field(default=False)
+    important: bool = Field(default=False)
     nudge_interval_minutes: Optional[int] = None
     reset_time: str = Field(default="00:00")
     weekly_reset_day: str = Field(default="sunday")
@@ -184,6 +185,7 @@ class Reminder(SQLModel, table=True):
     notes: Optional[str] = None
     # Persistent reminders keep producing notification nudges until completed.
     repeat_until_completed: bool = False
+    important: bool = Field(default=False)
     nudge_interval_minutes: Optional[int] = None
     completed_at: Optional[datetime] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)

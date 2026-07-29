@@ -128,6 +128,7 @@ def ensure_schema(eng: Engine = engine) -> None:
                 "financial_source": "VARCHAR",
                 "icon": "VARCHAR",
                 "color": "VARCHAR",
+                "important": "BOOLEAN DEFAULT FALSE",
             },
         )
         if gcols and "anchor_value" not in original_goal_columns:
@@ -152,6 +153,7 @@ def ensure_schema(eng: Engine = engine) -> None:
             {
                 "repeat_until_completed": "BOOLEAN DEFAULT FALSE",
                 "nudge_interval_minutes": "INTEGER",
+                "important": "BOOLEAN DEFAULT FALSE",
             },
         )
 
