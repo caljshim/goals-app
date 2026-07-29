@@ -3,7 +3,6 @@ import UIKit
 import Charts
 import LinkKit
 import Security
-import UniformTypeIdentifiers
 
 // MARK: - API models
 
@@ -1768,8 +1767,7 @@ struct DashboardView: View {
             .contentShape(Rectangle())
         } else {
             SwipeActionRow(actionLabel: "Remove", systemImage: "trash") {
-                withAnimation { widgets.removeAll { $0 == id } }
-                save()
+                removeWidget(id)
             } content: {
                 DashboardWidget(id: id)
             }
@@ -1781,8 +1779,7 @@ struct DashboardView: View {
             Text(widgetTitle(id)).font(.caption.bold()).foregroundStyle(.secondary)
             Spacer()
             Button {
-                withAnimation { widgets.removeAll { $0 == id } }
-                save()
+                removeWidget(id)
             } label: {
                 Image(systemName: "minus.circle.fill").foregroundStyle(Theme.negative)
             }
@@ -1818,6 +1815,7 @@ struct DashboardView: View {
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(reorderSpace)))
             .onChanged { value in
                 guard case .second(true, let drag?) = value else { return }
+                guard liftedID == nil || liftedID == id else { return }
                 if liftedID == nil {
                     liftedID = id
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -1851,6 +1849,11 @@ struct DashboardView: View {
     }
 
     func save() { DashboardSettings.widgets = widgets }
+
+    func removeWidget(_ id: String) {
+        withAnimation { widgets.removeAll { $0 == id } }
+        save()
+    }
 
     func widgetTitle(_ id: String) -> String {
         DashboardWidgetRegistry.definition(for: id)?.title
