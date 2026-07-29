@@ -9,6 +9,33 @@ import XCTest
 @testable import goals_app
 
 final class goals_appTests: XCTestCase {
+    func testGoalTimelineFillsQuietCalendarDaysThroughRequestedEnd() throws {
+        let history = [
+            HistoryPoint(value: 10, at: "2026-07-19T12:00:00"),
+            HistoryPoint(value: 15, at: "2026-07-22T12:00:00"),
+        ]
+        let end = try XCTUnwrap(Calendar.current.date(from: DateComponents(year: 2026, month: 7, day: 22)))
+
+        let timeline = GoalChartTimeline.daily(history, through: end)
+
+        XCTAssertEqual(timeline.map(\.dayKey), ["2026-07-19", "2026-07-20", "2026-07-21", "2026-07-22"])
+        XCTAssertEqual(timeline.map(\.value), [10, 10, 10, 15])
+        XCTAssertEqual(timeline.map(\.isRecorded), [true, false, false, true])
+    }
+
+    func testGoalTimelineUsesLastUpdateForEachDay() throws {
+        let history = [
+            HistoryPoint(value: 10, at: "2026-07-19T10:00:00"),
+            HistoryPoint(value: 12, at: "2026-07-19T18:00:00"),
+        ]
+        let end = try XCTUnwrap(Calendar.current.date(from: DateComponents(year: 2026, month: 7, day: 19)))
+
+        let timeline = GoalChartTimeline.daily(history, through: end)
+
+        XCTAssertEqual(timeline.count, 1)
+        XCTAssertEqual(timeline.first?.value, 12)
+    }
+
     func testActionReceiptHiddenWhenReplyAlreadyDescribesIt() {
         let actions = CopilotActionReceiptFilter.visibleActions(
             reply: "I categorized the unbudgeted transactions as dining.",
@@ -34,5 +61,67 @@ final class goals_appTests: XCTestCase {
         )
 
         XCTAssertEqual(actions, ["Updated transaction category"])
+    }
+
+    // MARK: - DashboardReorder
+
+    func testReorderedMovesCardDownward() {
+        XCTAssertEqual(
+            DashboardReorder.reordered(["a", "b", "c", "d"], move: "a", to: 2),
+            ["b", "c", "a", "d"]
+        )
+    }
+
+    func testReorderedMovesCardUpward() {
+        XCTAssertEqual(
+            DashboardReorder.reordered(["a", "b", "c", "d"], move: "d", to: 1),
+            ["a", "d", "b", "c"]
+        )
+    }
+
+    func testReorderedClampsPastEnd() {
+        XCTAssertEqual(
+            DashboardReorder.reordered(["a", "b", "c"], move: "a", to: 99),
+            ["b", "c", "a"]
+        )
+    }
+
+    func testReorderedIsNoOpForSameSlotOrMissingID() {
+        XCTAssertEqual(DashboardReorder.reordered(["a", "b", "c"], move: "b", to: 1), ["a", "b", "c"])
+        XCTAssertEqual(DashboardReorder.reordered(["a", "b", "c"], move: "zzz", to: 0), ["a", "b", "c"])
+    }
+
+    func testTargetIndexAboveAllRowsIsZero() {
+        let mids: [String: CGFloat] = ["a": 50, "b": 150, "c": 250]
+        XCTAssertEqual(
+            DashboardReorder.targetIndex(order: ["a", "b", "c"], midY: mids, liftedID: "b", fingerY: 10),
+            0
+        )
+    }
+
+    func testTargetIndexBelowAllRowsIsLastIndex() {
+        let mids: [String: CGFloat] = ["a": 50, "b": 150, "c": 250]
+        XCTAssertEqual(
+            DashboardReorder.targetIndex(order: ["a", "b", "c"], midY: mids, liftedID: "b", fingerY: 999),
+            2
+        )
+    }
+
+    func testTargetIndexExcludesLiftedRowSoRestIsStable() {
+        // Lifted "b" resting near its own slot (150) should not shuffle.
+        let mids: [String: CGFloat] = ["a": 50, "b": 150, "c": 250]
+        XCTAssertEqual(
+            DashboardReorder.targetIndex(order: ["a", "b", "c"], midY: mids, liftedID: "b", fingerY: 160),
+            1
+        )
+    }
+
+    func testTargetIndexSkipsRowsWithNoMeasuredFrame() {
+        // "c" unmeasured (off-screen): finger below "a" only.
+        let mids: [String: CGFloat] = ["a": 50, "b": 150]
+        XCTAssertEqual(
+            DashboardReorder.targetIndex(order: ["a", "b", "c"], midY: mids, liftedID: "b", fingerY: 120),
+            1
+        )
     }
 }
