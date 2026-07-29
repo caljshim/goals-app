@@ -585,6 +585,7 @@ struct CategorizeUnbudgetedJobBody: Encodable {
                 if $0.scheduledFor != $1.scheduledFor { return $0.scheduledFor < $1.scheduledFor }
                 return ($0.reminderTime ?? "99:99") < ($1.reminderTime ?? "99:99")
             }
+            publishTodayWidget()
             await ReminderNotificationScheduler.sync(
                 loaded.filter { $0.source == "reminder" || $0.source == "routine" },
                 requestAuthorization: requestNotificationPermission
@@ -802,6 +803,27 @@ struct CategorizeUnbudgetedJobBody: Encodable {
         guard let index = scheduleItems.firstIndex(where: { $0.id == id }) else { return }
         scheduleItems[index].completed = completed
         scheduleItems[index].missed = scheduleItems[index].scheduledFor < Date().apiDate && !completed
+        publishTodayWidget()
+    }
+    private func publishTodayWidget() {
+        let today = Date().apiDate
+        let tasks = scheduleItems
+            .filter { $0.scheduledFor == today }
+            .map {
+                AudelWidgetTask(
+                    id: $0.id,
+                    source: $0.source,
+                    sourceID: $0.sourceId,
+                    title: $0.title,
+                    scheduledFor: $0.scheduledFor,
+                    reminderTime: $0.reminderTime,
+                    completed: $0.completed,
+                    missed: $0.missed
+                )
+            }
+        AudelWidgetStore.save(
+            AudelWidgetSnapshot(generatedAt: Date(), tasks: tasks)
+        )
     }
     func ensureManualAccount() async throws -> Account {
         let account: Account = try await api.request("accounts/manual", method: "POST")
@@ -1691,6 +1713,11 @@ struct ContentView: View {
         .onAppear {
             let validTabs = ["dashboard", "finances", "goals", "routines", "audel"]
             if !validTabs.contains(selection) { selection = "dashboard" }
+        }
+        .onOpenURL { url in
+            if let tab = AudelDeepLink.tab(for: url) {
+                selection = tab
+            }
         }
         .overlay {
             if !hasCompletedInitialLoad {

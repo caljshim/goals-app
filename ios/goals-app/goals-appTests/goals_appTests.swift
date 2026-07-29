@@ -124,4 +124,62 @@ final class goals_appTests: XCTestCase {
             1
         )
     }
+
+    // MARK: - System widgets
+
+    func testWidgetSnapshotRemainingFilterKeepsEventsAndIncompleteTasks() {
+        let snapshot = AudelWidgetSnapshot(
+            generatedAt: Date(),
+            tasks: [
+                widgetTask(id: "done", title: "Done", completed: true),
+                widgetTask(id: "later", title: "Later", completed: false),
+                widgetTask(id: "event", source: "event", title: "Appointment", completed: false),
+            ]
+        )
+
+        XCTAssertEqual(snapshot.tasks(for: .remaining).map(\.id), ["event", "later"])
+        XCTAssertEqual(snapshot.completedCount, 1)
+        XCTAssertEqual(snapshot.remainingCount, 1)
+    }
+
+    func testWidgetSnapshotSortsTimedItemsBeforeUntimedItems() {
+        let snapshot = AudelWidgetSnapshot(
+            generatedAt: Date(),
+            tasks: [
+                widgetTask(id: "untimed", title: "Untimed"),
+                widgetTask(id: "evening", title: "Evening", reminderTime: "18:00"),
+                widgetTask(id: "morning", title: "Morning", reminderTime: "08:00"),
+            ]
+        )
+
+        XCTAssertEqual(
+            snapshot.tasks(for: .everything).map(\.id),
+            ["morning", "evening", "untimed"]
+        )
+    }
+
+    func testAudelDeepLinksResolveToExistingTabs() {
+        XCTAssertEqual(AudelDeepLink.tab(for: URL(string: "audel://assistant")!), "audel")
+        XCTAssertEqual(AudelDeepLink.tab(for: URL(string: "audel://schedule")!), "routines")
+        XCTAssertNil(AudelDeepLink.tab(for: URL(string: "https://example.com")!))
+    }
+
+    private func widgetTask(
+        id: String,
+        source: String = "routine",
+        title: String,
+        reminderTime: String? = nil,
+        completed: Bool = false
+    ) -> AudelWidgetTask {
+        AudelWidgetTask(
+            id: id,
+            source: source,
+            sourceID: 1,
+            title: title,
+            scheduledFor: "2026-07-29",
+            reminderTime: reminderTime,
+            completed: completed,
+            missed: false
+        )
+    }
 }

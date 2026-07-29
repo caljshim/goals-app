@@ -11,6 +11,10 @@ import SwiftUI
 struct goals_appApp: App {
     @UIApplicationDelegateAdaptor(ReminderNotificationDelegate.self) private var notificationDelegate
 
+    init() {
+        AudelWidgetRuntime.bootstrapFromEnvironment()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
