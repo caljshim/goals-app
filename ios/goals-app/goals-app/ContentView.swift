@@ -1594,15 +1594,15 @@ struct ContentView: View {
                 .tabItem { Label("Finances", systemImage: "creditcard") }
                 .badge(unbudgetedCount)
                 .tag("finances")
-            NavigationStack { GoalsView() }.tabItem { Label("Goals", systemImage: "target") }.tag("goals")
-            NavigationStack { ScheduleView() }.tabItem { Label("Schedule", systemImage: "calendar") }.tag("routines")
             NavigationStack {
                 CopilotView()
                     .navigationTitle("Audel")
                     .navigationBarTitleDisplayMode(.inline)
             }
-            .tabItem { Label("Audel", systemImage: "sparkles") }
+            .tabItem { Label("Audel", systemImage: "a.circle.fill") }
             .tag("audel")
+            NavigationStack { GoalsView() }.tabItem { Label("Goals", systemImage: "target") }.tag("goals")
+            NavigationStack { ScheduleView() }.tabItem { Label("Schedule", systemImage: "calendar") }.tag("routines")
             // Invest tab hidden for now (2026-07-28). Restore this line to bring it back.
             // NavigationStack { InvestView() }.tabItem { Label("Invest", systemImage: "chart.line.uptrend.xyaxis") }.tag("invest")
         }
