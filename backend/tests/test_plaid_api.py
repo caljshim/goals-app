@@ -4,8 +4,27 @@ from datetime import date
 from plaid.exceptions import ApiException
 from sqlmodel import select
 
+from app.budget import plaid_client
 from app.budget.models import Account, PlaidItem, Transaction
 from app.budget.routers import plaid as plaid_router
+from app.config import get_settings
+
+
+def test_get_client_reuses_instance_and_rekeys_on_settings(monkeypatch):
+    """The Plaid client (and its HTTP connection pool) is cached, not rebuilt per
+    call, but a credentials change produces a fresh client."""
+    monkeypatch.setenv("PLAID_CLIENT_ID", "id-1")
+    monkeypatch.setenv("PLAID_SECRET", "secret-1")
+    monkeypatch.setenv("PLAID_ENV", "sandbox")
+    get_settings.cache_clear()
+    plaid_client._build_client.cache_clear()
+
+    first = plaid_client.get_client()
+    assert plaid_client.get_client() is first  # reused across calls
+
+    monkeypatch.setenv("PLAID_SECRET", "secret-2")
+    get_settings.cache_clear()
+    assert plaid_client.get_client() is not first  # rekeyed on new secret
 
 
 def test_link_token(client, monkeypatch):

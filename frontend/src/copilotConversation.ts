@@ -20,6 +20,13 @@ export function branchConversation(
 
   return [
     ...messages.slice(0, index),
-    { id: nextId, role: "user", content },
+    {
+      id: nextId,
+      role: "user",
+      content,
+      ...(source.attachment_ids?.length
+        ? { attachment_ids: source.attachment_ids }
+        : {}),
+    },
   ];
 }

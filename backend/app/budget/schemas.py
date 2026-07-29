@@ -344,6 +344,7 @@ class ExchangeRequest(BaseModel):
 class ChatMessage(BaseModel):
     role: str
     content: str
+    attachment_ids: list[str] = Field(default_factory=list, max_length=4)
 
 
 class ChatRequest(BaseModel):

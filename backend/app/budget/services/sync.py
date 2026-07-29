@@ -1,9 +1,14 @@
+import logging
 import threading
 
+from sqlalchemy import inspect as sa_inspect
 from sqlmodel import Session, select
 
 from app.budget import plaid_client
 from app.budget.models import Account, PlaidItem, Transaction
+from app.perf import timed
+
+logger = logging.getLogger("app.budget.sync")
 
 # Syncs must not overlap. The frontend fires /plaid/sync from several unguarded
 # places (the 15-min auto-sync, the "Refresh from bank" button, the Accounts
@@ -150,6 +155,7 @@ def _upsert(
     session: Session,
     acct_map: dict[str, int],
     data: dict,
+    existing_by_pid: dict[str, Transaction],
     *,
     reconcile_existing: bool = False,
     eligible_rows: set[int] | None = None,
@@ -158,17 +164,16 @@ def _upsert(
     local_account_id = acct_map.get(data["plaid_account_id"])
     if local_account_id is None:
         return False
-    existing = session.exec(
-        select(Transaction).where(Transaction.plaid_transaction_id == data["plaid_transaction_id"])
-    ).first()
+    pid = data["plaid_transaction_id"]
+    existing = existing_by_pid.get(pid)
     eligible_rows = eligible_rows if eligible_rows is not None else set()
     claimed_rows = claimed_rows if claimed_rows is not None else set()
     if not existing and reconcile_existing:
         existing = _natural_match(
             session, local_account_id, data, eligible_rows, claimed_rows
         )
-    row = existing or Transaction(plaid_transaction_id=data["plaid_transaction_id"], account_id=local_account_id)
-    row.plaid_transaction_id = data["plaid_transaction_id"]
+    row = existing or Transaction(plaid_transaction_id=pid, account_id=local_account_id)
+    row.plaid_transaction_id = pid
     row.account_id = local_account_id
     row.date = data["date"]
     row.name = data["name"]
@@ -177,49 +182,80 @@ def _upsert(
     row.category = data["category"]
     row.pending = data["pending"]
     session.add(row)
+    # Keep the index live so a later page that modifies this same transaction
+    # finds the row we just staged instead of missing it and inserting a dupe.
+    existing_by_pid[pid] = row
     if row.id is not None:
         claimed_rows.add(row.id)
     return True
 
 
+def _existing_by_plaid_id(
+    session: Session, account_ids: list[int]
+) -> dict[str, Transaction]:
+    """Load every Plaid-backed row for these accounts once, keyed by Plaid ID.
+
+    Replaces a per-transaction SELECT in the sync loop (an N+1 that dominated the
+    DB cost on large histories) with a single query.
+    """
+    if not account_ids:
+        return {}
+    rows = session.exec(
+        select(Transaction).where(
+            Transaction.account_id.in_(account_ids),
+            Transaction.plaid_transaction_id.is_not(None),
+        )
+    ).all()
+    return {row.plaid_transaction_id: row for row in rows}
+
+
 def sync_item(session: Session, item: PlaidItem, client) -> dict:
-    with _sync_lock:
+    with _sync_lock, timed("sync.item", item=item.id):
         counts = {"added": 0, "modified": 0, "removed": 0, "deduplicated": 0}
         acct_map = _account_map(session, item.id)
+        account_ids = list(acct_map.values())
         cursor = item.sync_cursor
         full_history_sync = cursor is None
         reconcile_existing = cursor is None
         eligible_rows = set()
-        if reconcile_existing:
-            account_ids = list(acct_map.values())
-            if account_ids:
-                eligible_rows = set(session.exec(
-                    select(Transaction.id).where(Transaction.account_id.in_(account_ids))
-                ).all())
+        if reconcile_existing and account_ids:
+            eligible_rows = set(session.exec(
+                select(Transaction.id).where(Transaction.account_id.in_(account_ids))
+            ).all())
+        existing_by_pid = _existing_by_plaid_id(session, account_ids)
         claimed_rows: set[int] = set()
+        pages = 0
         while True:
             page = plaid_client.sync_transactions(client, item.access_token, cursor)
+            pages += 1
             for data in page["added"]:
                 if _upsert(
-                    session, acct_map, data,
+                    session, acct_map, data, existing_by_pid,
                     reconcile_existing=reconcile_existing,
                     eligible_rows=eligible_rows,
                     claimed_rows=claimed_rows,
                 ):
                     counts["added"] += 1
             for data in page["modified"]:
-                if _upsert(session, acct_map, data):
+                if _upsert(session, acct_map, data, existing_by_pid):
                     counts["modified"] += 1
             for tid in page["removed"]:
-                existing = session.exec(
-                    select(Transaction).where(Transaction.plaid_transaction_id == tid)
-                ).first()
-                if existing:
-                    session.delete(existing)
+                existing = existing_by_pid.pop(tid, None)
+                if existing is not None:
+                    if sa_inspect(existing).persistent:
+                        session.delete(existing)
+                    else:
+                        # Added earlier in this same sync and never flushed; just
+                        # drop the staged insert instead of deleting a phantom row.
+                        session.expunge(existing)
                     counts["removed"] += 1
             cursor = page["next_cursor"]
             if not page["has_more"]:
                 break
+        logger.info(
+            "sync.item item=%s pages=%s added=%s modified=%s removed=%s",
+            item.id, pages, counts["added"], counts["modified"], counts["removed"],
+        )
         item.sync_cursor = cursor
         if full_history_sync:
             # The initial cursor replay plus _natural_match is the authoritative

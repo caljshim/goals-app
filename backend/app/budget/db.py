@@ -155,6 +155,18 @@ def ensure_schema(eng: Engine = engine) -> None:
             },
         )
 
+        # Auto-integration proposals were introduced before the exact web-search
+        # result URLs were retained separately from model-authored evidence.
+        _add_missing_columns(
+            conn,
+            "integration_proposal",
+            {
+                "research_sources_json": (
+                    "JSONB NOT NULL DEFAULT '[]'::jsonb"
+                )
+            },
+        )
+
         # Spending limits used to be represented as goals. Convert active rows to
         # budget rules, then archive them so their history remains recoverable.
         if gcols and {"kind", "category", "target", "period", "archived_at"}.issubset(gcols):

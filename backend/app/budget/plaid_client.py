@@ -1,3 +1,5 @@
+from functools import lru_cache
+
 import plaid
 from plaid.api import plaid_api
 from plaid.model.accounts_get_request import AccountsGetRequest
@@ -10,6 +12,7 @@ from plaid.model.transactions_refresh_request import TransactionsRefreshRequest
 from plaid.model.transactions_sync_request import TransactionsSyncRequest
 
 from app.config import get_settings
+from app.perf import timed
 
 _ENV_HOSTS = {
     "sandbox": plaid.Environment.Sandbox,
@@ -17,13 +20,20 @@ _ENV_HOSTS = {
 }
 
 
+@lru_cache(maxsize=4)
+def _build_client(env: str, client_id: str, secret: str) -> plaid_api.PlaidApi:
+    config = plaid.Configuration(
+        host=_ENV_HOSTS.get(env, plaid.Environment.Sandbox),
+        api_key={"clientId": client_id, "secret": secret},
+    )
+    # The underlying ApiClient owns a urllib3 connection pool. Reusing it across
+    # calls keeps HTTP keep-alive alive, so we don't re-pay DNS + TLS per request.
+    return plaid_api.PlaidApi(plaid.ApiClient(config))
+
+
 def get_client() -> plaid_api.PlaidApi:
     s = get_settings()
-    config = plaid.Configuration(
-        host=_ENV_HOSTS.get(s.plaid_env, plaid.Environment.Sandbox),
-        api_key={"clientId": s.plaid_client_id, "secret": s.plaid_secret},
-    )
-    return plaid_api.PlaidApi(plaid.ApiClient(config))
+    return _build_client(s.plaid_env, s.plaid_client_id, s.plaid_secret)
 
 
 def create_link_token(client, access_token: str | None = None) -> str:
@@ -59,7 +69,8 @@ def _balance(acc):
 
 
 def fetch_accounts(client, access_token: str) -> list[dict]:
-    resp = client.accounts_get(AccountsGetRequest(access_token=access_token))
+    with timed("plaid.accounts_get"):
+        resp = client.accounts_get(AccountsGetRequest(access_token=access_token))
     out = []
     for a in resp.accounts:
         current, available, currency = _balance(a)
@@ -95,14 +106,16 @@ def _norm_txn(t) -> dict:
 def refresh_transactions(client, access_token: str) -> None:
     """Ask Plaid to re-pull this item from the bank right now (async on Plaid's side;
     new data arrives via a subsequent transactions_sync). May incur a per-call fee."""
-    client.transactions_refresh(TransactionsRefreshRequest(access_token=access_token))
+    with timed("plaid.transactions_refresh"):
+        client.transactions_refresh(TransactionsRefreshRequest(access_token=access_token))
 
 
 def sync_transactions(client, access_token: str, cursor: str | None) -> dict:
     kwargs = {"access_token": access_token}
     if cursor:
         kwargs["cursor"] = cursor
-    resp = client.transactions_sync(TransactionsSyncRequest(**kwargs))
+    with timed("plaid.transactions_sync"):
+        resp = client.transactions_sync(TransactionsSyncRequest(**kwargs))
     return {
         "added": [_norm_txn(t) for t in resp.added],
         "modified": [_norm_txn(t) for t in resp.modified],

@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { Account, Budget, BudgetPeriod, CalendarEvent, ChatMessage, ChatResponse, Goal, GoalTask, MerchantRule, Portfolio, Reminder, ScheduleItem, Summary, Transaction } from "./types";
+import type { Account, Budget, BudgetPeriod, CalendarEvent, ChatMessage, ChatResponse, Goal, GoalTask, MediaAsset, MerchantRule, Portfolio, Reminder, ScheduleItem, Summary, Transaction } from "./types";
 
 const http = axios.create({ baseURL: "/api" });
 
@@ -79,6 +79,14 @@ export const api = {
     http.post<Goal>(`/goals/${id}/raise`, { target }).then((r) => r.data),
   deleteGoal: (id: number) => http.delete(`/goals/${id}`),
   getPortfolio: () => http.get<Portfolio>("/portfolio").then((r) => r.data),
+  uploadImage: (file: File) =>
+    http.post<MediaAsset>("/media", file, {
+      headers: {
+        "Content-Type": file.type || "application/octet-stream",
+        "X-Filename": file.name.replace(/[^\x20-\x7E]/g, "_"),
+      },
+    }).then((r) => r.data),
+  deleteImage: (id: string) => http.delete(`/media/${id}`),
   chat: (messages: ChatMessage[]) =>
     http.post<ChatResponse>("/assistant/chat", {
       messages,

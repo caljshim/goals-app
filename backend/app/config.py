@@ -34,6 +34,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("anthropic_api_key", "claude_api_key"),
     )
     assistant_model: str = "claude-sonnet-5"
+    # Optional override for API-connector research. Defaults to assistant_model.
+    integration_discovery_model: str = ""
 
 
 @lru_cache

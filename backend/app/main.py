@@ -3,8 +3,9 @@ import secrets
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlmodel import Session
 
-from app.budget.db import init_db
+from app.budget.db import engine, init_db
 from app.config import get_settings
 
 app = FastAPI(title="Money API")
@@ -78,6 +79,17 @@ app.include_router(rules.router)
 app.include_router(goals.router)
 app.include_router(schedule.router)
 
+# Reviewed external API connectors and normalized goal measurements.
+from app.auto_integration import router as auto_integration
+from app.auto_integration.service import seed_builtin_connectors
+
+app.include_router(auto_integration.router)
+
+# Reusable image uploads for multimodal Copilot requests and future domains.
+from app.media import router as media
+
+app.include_router(media.router)
+
 # Investing domain (read-only tastytrade portfolio).
 from app.invest import portfolio
 
@@ -95,3 +107,5 @@ app.include_router(copilot_jobs.router)
 @app.on_event("startup")
 def _startup():
     init_db()
+    with Session(engine) as session:
+        seed_builtin_connectors(session)

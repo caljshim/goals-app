@@ -73,6 +73,9 @@ class GoalContext:
     today: date
     financial_values: dict[int, float] = field(default_factory=dict)
     financial_labels: dict[int, str] = field(default_factory=dict)
+    integration_values: dict[int, float] = field(default_factory=dict)
+    integration_units: dict[int, str] = field(default_factory=dict)
+    integration_labels: dict[int, str] = field(default_factory=dict)
 
 
 def _pct(current: float, target: float | None) -> float | None:
@@ -144,7 +147,12 @@ class NumericGoalType(GoalType):
     unit = ""
 
     def progress(self, goal, ctx):
-        current = _manual_current(goal, ctx)
+        integrated = goal.id in ctx.integration_values
+        current = (
+            ctx.integration_values[goal.id]
+            if integrated
+            else _manual_current(goal, ctx)
+        )
         if goal.direction == "under":
             status = "reached" if (goal.target is not None and current <= goal.target) else "active"
             pct = _under_pct(current, goal.target, goal.anchor_value)
@@ -152,7 +160,9 @@ class NumericGoalType(GoalType):
             status = "reached" if (goal.target and current >= goal.target) else "active"
             pct = _pct(current, goal.target)
         return {"current_value": round(current, 2), "pct": pct,
-                "status": status, "unit": self.unit, "linked_label": None,
+                "status": status,
+                "unit": ctx.integration_units.get(goal.id, self.unit),
+                "linked_label": ctx.integration_labels.get(goal.id),
                 "days": None, "best_days": None}
 
 

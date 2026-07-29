@@ -53,6 +53,35 @@ def test_sync_item_adds_modifies_removes_and_saves_cursor(monkeypatch):
     assert item.reconciliation_version == 1
 
 
+def test_incremental_sync_updates_preexisting_row_via_batched_index(monkeypatch):
+    """A cursored (incremental) sync that modifies an already-stored transaction
+    must update it in place, not insert a duplicate — the preloaded existence
+    index has to find rows that predate this sync."""
+    s = make_session()
+    item = PlaidItem(plaid_item_id="item_1", access_token="tok", sync_cursor="C0")
+    s.add(item); s.commit(); s.refresh(item)
+    s.add(Account(plaid_account_id="acc_1", item_id=item.id, name="Checking", type="depository"))
+    s.commit()
+    s.add(Transaction(
+        plaid_transaction_id="t1", account_id=1, date=date(2026, 7, 1),
+        name="Coffee", merchant_name="Cafe", amount=4.5,
+        category="FOOD_AND_DRINK", pending=False,
+    ))
+    s.commit()
+
+    monkeypatch.setattr(plaid_client, "sync_transactions", lambda client, token, cursor: {
+        "added": [], "modified": [_txn("t1", 6.25)], "removed": [],
+        "next_cursor": "C1", "has_more": False,
+    })
+
+    counts = sync_item(s, item, client=None)
+
+    assert counts["modified"] == 1
+    rows = s.exec(select(Transaction)).all()
+    assert len(rows) == 1  # updated in place, no duplicate inserted
+    assert rows[0].amount == 6.25
+
+
 def test_authoritative_reconciliation_removes_only_stale_relink_copies(monkeypatch):
     s = make_session()
     item = PlaidItem(

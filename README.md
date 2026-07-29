@@ -7,6 +7,9 @@ One personal-finance app with two domains and a unified AI copilot:
 - **Copilot** — a single chat that delegates each question to a budgeting or investing
   specialist (and calls both for cross-domain questions like "how much spare cash could I
   invest?"). Education-forward and conservative; it cannot place trades.
+- **Auto-integrations** — web-researched connector proposals with explicit
+  approval, safe read-only execution, JSONB auditing, and normalized goal
+  measurements.
 
 Formed by merging the former `finance/` and `investor/` apps into one FastAPI backend
 (separate routers per domain) and one React frontend.
@@ -18,6 +21,7 @@ backend/app/
   budget/    Plaid budgeting (models, db, categories, plaid_client, schemas, routers, services)
   invest/    tastytrade read-only (tasty.py, portfolio router, investing specialist)
   copilot/   orchestrator agent + /api/assistant/chat (delegates to the two specialists)
+  auto_integration/ researched proposals + review + safe GET execution + measurements
   config.py  merged settings   main.py  wires all routers
 frontend/    React + Vite: Dashboard / Transactions / Accounts / Budgets / Invest + CopilotChat
 ```

@@ -211,7 +211,22 @@ def build_context(session: Session) -> GoalContext:
             ", ".join(a.name for a in selected)
             if selected_ids else (goal.category or "All accounts")
         )
-    return GoalContext(balances, names, by_period, today, financial_values, financial_labels)
+    from app.auto_integration.bindings import integration_goal_aggregates
+
+    integration_values, integration_units, integration_labels = (
+        integration_goal_aggregates(session)
+    )
+    return GoalContext(
+        balances,
+        names,
+        by_period,
+        today,
+        financial_values,
+        financial_labels,
+        integration_values,
+        integration_units,
+        integration_labels,
+    )
 
 
 _KIND_ICON = {"save": "bank", "spend_cap": "card", "financial": "cashflow",

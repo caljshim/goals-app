@@ -3,6 +3,7 @@ import { api } from "../api";
 import { branchConversation, type CopilotMessage } from "../copilotConversation";
 import { applyDashboardUiActions, type DashboardUiAction } from "../dashboardConfig";
 import { parseCopilotContent, parseInlineMarkdown } from "../inlineMarkdown";
+import type { MediaAsset } from "../types";
 
 const STARTERS = [
   "How am I doing this month?",
@@ -16,9 +17,12 @@ export default function CopilotChat({ onApplied }: { onApplied?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<MediaAsset[]>([]);
+  const [uploading, setUploading] = useState(false);
   const conversationRef = useRef<HTMLDivElement>(null);
   const conversationBottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const newId = () => crypto.randomUUID();
 
@@ -34,7 +38,11 @@ export default function CopilotChat({ onApplied }: { onApplied?: () => void }) {
     setMessages(history);
     setBusy(true);
     try {
-      const res = await api.chat(history.map((m) => ({ role: m.role, content: m.content })));
+      const res = await api.chat(history.map((m) => ({
+        role: m.role,
+        content: m.content,
+        attachment_ids: m.attachment_ids,
+      })));
       setMessages([
         ...history,
         { id: newId(), role: "assistant", content: res.reply || "(no reply)", actions: res.actions },
@@ -52,20 +60,27 @@ export default function CopilotChat({ onApplied }: { onApplied?: () => void }) {
 
   const send = (text: string) => {
     const content = text.trim();
-    if (!content || busy) return;
+    if ((!content && attachments.length === 0) || busy || uploading) return;
 
     const history = editingMessageId
       ? branchConversation(messages, editingMessageId, content, newId())
-      : [...messages, { id: newId(), role: "user" as const, content }];
+      : [...messages, {
+          id: newId(),
+          role: "user" as const,
+          content,
+          attachment_ids: attachments.map((asset) => asset.id),
+        }];
     if (!history) return;
 
     setInput("");
+    setAttachments([]);
     setEditingMessageId(null);
     void requestReply(history);
   };
 
   const beginEditing = (message: CopilotMessage) => {
     if (busy) return;
+    setAttachments([]);
     setEditingMessageId(message.id);
     setInput(message.content);
     requestAnimationFrame(() => inputRef.current?.focus());
@@ -74,6 +89,33 @@ export default function CopilotChat({ onApplied }: { onApplied?: () => void }) {
   const cancelEditing = () => {
     setEditingMessageId(null);
     setInput("");
+  };
+
+  const uploadFiles = async (files: FileList | null) => {
+    if (!files?.length || busy || uploading) return;
+    const remaining = Math.max(0, 4 - attachments.length);
+    const selected = Array.from(files).slice(0, remaining);
+    if (!selected.length) return;
+    setError(null);
+    setUploading(true);
+    try {
+      const uploaded: MediaAsset[] = [];
+      for (const file of selected) {
+        uploaded.push(await api.uploadImage(file));
+      }
+      setAttachments((current) => [...current, ...uploaded].slice(0, 4));
+    } catch (e) {
+      const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      setError(typeof detail === "string" ? detail : "The image could not be uploaded.");
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const removeAttachment = (asset: MediaAsset) => {
+    setAttachments((current) => current.filter((item) => item.id !== asset.id));
+    void api.deleteImage(asset.id).catch(() => undefined);
   };
 
   const resend = (message: CopilotMessage) => {
@@ -112,6 +154,11 @@ export default function CopilotChat({ onApplied }: { onApplied?: () => void }) {
             <div className={`inline-block max-w-[85%] rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap ${
               m.role === "user" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-800"
             }`}>
+              {!!m.attachment_ids?.length && (
+                <div className="mb-1 text-xs opacity-75">
+                  📎 {m.attachment_ids.length} image{m.attachment_ids.length === 1 ? "" : "s"}
+                </div>
+              )}
               <CopilotMarkdownText content={m.content} />
             </div>
             {m.actions && m.actions.length > 0 && (
@@ -148,6 +195,19 @@ export default function CopilotChat({ onApplied }: { onApplied?: () => void }) {
 
       <form onSubmit={(e) => { e.preventDefault(); send(input); }}
         className="p-3 border-t border-slate-200">
+        {attachments.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {attachments.map((asset) => (
+              <span key={asset.id}
+                className="inline-flex items-center gap-1 rounded-full border border-slate-300 bg-slate-50 px-2 py-1 text-xs text-slate-700">
+                📎 {asset.filename}
+                <button type="button" onClick={() => removeAttachment(asset)}
+                  className="font-semibold text-slate-500 hover:text-slate-900"
+                  aria-label={`Remove ${asset.filename}`}>×</button>
+              </span>
+            ))}
+          </div>
+        )}
         {editingMessageId && (
           <div className="mb-2 flex items-center justify-between text-xs text-slate-500">
             <span>✎ Editing prompt</span>
@@ -157,10 +217,18 @@ export default function CopilotChat({ onApplied }: { onApplied?: () => void }) {
           </div>
         )}
         <div className="flex gap-2">
+          <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/gif,image/webp"
+            multiple className="hidden" onChange={(event) => void uploadFiles(event.target.files)} />
+          <button type="button" onClick={() => fileInputRef.current?.click()}
+            disabled={busy || uploading || editingMessageId !== null || attachments.length >= 4}
+            className="rounded-lg border px-3 py-2 text-sm disabled:opacity-50"
+            aria-label="Attach images">
+            {uploading ? "…" : "＋ Photo"}
+          </button>
           <input ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask Audel about your money…" disabled={busy}
+            placeholder="Ask Audel anything or attach a photo…" disabled={busy}
             className="flex-1 border rounded-lg px-3 py-2 text-sm" />
-          <button disabled={busy || !input.trim()}
+          <button disabled={busy || uploading || (!input.trim() && attachments.length === 0)}
             className="px-3 py-2 rounded-lg bg-slate-900 text-white text-sm disabled:opacity-50">
             {editingMessageId ? "Save & resend" : "Send"}
           </button>

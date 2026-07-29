@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import PhotosUI
 import Charts
 import LinkKit
 import Security
@@ -119,8 +120,17 @@ struct PortfolioAccount: Codable, Identifiable {
     let positions: [Position]
 }
 struct Portfolio: Codable { let environment: String; let accounts: [PortfolioAccount] }
-struct ChatMessage: Codable, Identifiable { var id = UUID(); let role, content: String; var actions: [String]? = nil
-    enum CodingKeys: String, CodingKey { case role, content }
+struct ChatMessage: Codable, Identifiable {
+    var id = UUID()
+    let role, content: String
+    var attachmentIds: [String]? = nil
+    var actions: [String]? = nil
+    enum CodingKeys: String, CodingKey { case role, content, attachmentIds }
+}
+struct MediaAsset: Codable, Identifiable {
+    let id, filename, mediaType: String
+    let byteSize, width, height: Int
+    let sha256, createdAt: String
 }
 struct DashboardAction: Codable { let type: String; let widgetIds: [String]? }
 struct ChatResponse: Codable { let reply: String; let actions: [String]; let refresh: Bool; let uiActions: [DashboardAction]? }
@@ -270,6 +280,34 @@ actor APIClient {
         }
         if T.self == EmptyResponse.self { return EmptyResponse() as! T }
         return try decoder.decode(T.self, from: data)
+    }
+
+    func uploadImage(_ data: Data, filename: String) async throws -> MediaAsset {
+        var request = URLRequest(url: baseURL.appendingPathComponent("media"))
+        request.httpMethod = "POST"
+        request.httpBody = data
+        request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        let safeName = filename.unicodeScalars.map {
+            (32...126).contains($0.value) ? Character(String($0)) : "_"
+        }
+        request.setValue(String(safeName), forHTTPHeaderField: "X-Filename")
+        if let apiKey {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        let (responseData, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse
+        }
+        guard 200..<300 ~= http.statusCode else {
+            let detail = (
+                try? JSONSerialization.jsonObject(with: responseData)
+                    as? [String: Any]
+            )?["detail"] as? String
+            throw APIError.server(
+                detail ?? "Image upload failed (\(http.statusCode))."
+            )
+        }
+        return try decoder.decode(MediaAsset.self, from: responseData)
     }
 }
 
@@ -1327,12 +1365,20 @@ struct CategorizeUnbudgetedJobBody: Encodable {
         } catch { show(error) }
     }
     @discardableResult
-    func send(_ text: String) async -> Bool {
+    func uploadImage(_ data: Data, filename: String) async throws -> MediaAsset {
+        try await api.uploadImage(data, filename: filename)
+    }
+    func send(_ text: String, attachmentIds: [String] = []) async -> Bool {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty, !copilotRequestInFlight else { return false }
+        guard (!clean.isEmpty || !attachmentIds.isEmpty),
+              !copilotRequestInFlight else { return false }
         copilotRequestInFlight = true
         defer { copilotRequestInFlight = false }
-        messages.append(.init(role: "user", content: clean))
+        messages.append(.init(
+            role: "user",
+            content: clean,
+            attachmentIds: attachmentIds.isEmpty ? nil : attachmentIds
+        ))
         await requestCopilotReply()
         return true
     }
@@ -1353,13 +1399,18 @@ struct CategorizeUnbudgetedJobBody: Encodable {
         guard let index = messages.firstIndex(where: { $0.id == messageId }),
               messages[index].role == "user" else { return false }
         let original = messages[index].content
+        let attachmentIds = messages[index].attachmentIds
         let clean = (replacement ?? original).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return false }
+        guard !clean.isEmpty || !(attachmentIds ?? []).isEmpty else { return false }
 
         copilotRequestInFlight = true
         defer { copilotRequestInFlight = false }
         messages = Array(messages[..<index])
-        messages.append(.init(role: "user", content: clean))
+        messages.append(.init(
+            role: "user",
+            content: clean,
+            attachmentIds: attachmentIds
+        ))
         await requestCopilotReply()
         return true
     }
@@ -1474,15 +1525,30 @@ struct CategorizeUnbudgetedJobBody: Encodable {
 enum ChatStorage {
     private static let key = "money.copilot.history"
     private static let cap = 60
-    private struct StoredMessage: Codable { let role, content: String }
+    private struct StoredMessage: Codable {
+        let role, content: String
+        let attachmentIds: [String]?
+    }
 
     static func load() -> [ChatMessage] {
         guard let data = UserDefaults.standard.data(forKey: key),
               let stored = try? JSONDecoder().decode([StoredMessage].self, from: data) else { return [] }
-        return stored.map { ChatMessage(role: $0.role, content: $0.content) }
+        return stored.map {
+            ChatMessage(
+                role: $0.role,
+                content: $0.content,
+                attachmentIds: $0.attachmentIds
+            )
+        }
     }
     static func save(_ messages: [ChatMessage]) {
-        let stored = messages.suffix(cap).map { StoredMessage(role: $0.role, content: $0.content) }
+        let stored = messages.suffix(cap).map {
+            StoredMessage(
+                role: $0.role,
+                content: $0.content,
+                attachmentIds: $0.attachmentIds
+            )
+        }
         UserDefaults.standard.set(try? JSONEncoder().encode(stored), forKey: key)
     }
 }
@@ -1600,11 +1666,11 @@ struct ContentView: View {
                     .navigationBarTitleDisplayMode(.inline)
             }
             .tabItem {
-                Label {
-                    Text("Audel")
-                } icon: {
-                    Image(uiImage: AudelTabIcon.image)
-                }
+                // Icon-only: the Audel mark is distinctive enough to stand
+                // without a title. iOS centers a label-less tab icon, so it
+                // reads as a prominent center action among the labeled tabs.
+                Image(uiImage: AudelTabIcon.image)
+                    .accessibilityLabel("Audel")
             }
             .tag("audel")
             NavigationStack { GoalsView() }.tabItem { Label("Goals", systemImage: "target") }.tag("goals")

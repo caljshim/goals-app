@@ -72,6 +72,10 @@ def test_plain_reply_no_delegation():
             "ask_budgeting", "ask_investing", "ask_goals", "list_reminders",
             "create_reminder", "update_reminder", "complete_reminder", "configure_dashboard",
         "list_events", "create_event", "update_event", "delete_event",
+        "create_events", "list_goal_connectors",
+        "research_goal_integration", "approve_integration_proposal",
+        "bind_goal_connector", "list_goal_integrations",
+        "run_goal_integration",
     }
 
 
@@ -213,6 +217,135 @@ def test_creates_calendar_event_directly(monkeypatch):
     assert seen["scheduled_for"] == date(2026, 7, 25)
     assert seen["start_time"] == "19:00"
     assert out["actions"] == ["Created event Dinner with Maya"]
+
+
+def test_planner_entries_use_atomic_batch_calendar_tool(monkeypatch):
+    seen = {}
+
+    def create_events(session, payload):
+        seen["events"] = payload
+        return {
+            "created": [
+                {"id": 1, "title": event["title"]}
+                for event in payload
+            ],
+            "skipped_duplicates": [],
+        }
+
+    monkeypatch.setattr(agent.schedule_svc, "create_events", create_events)
+    client = _FakeClient([
+        _FakeResp("tool_use", [_tool_use(
+            "t1",
+            "create_events",
+            events=[
+                {
+                    "title": "Dentist",
+                    "scheduled_for": "2026-08-03",
+                    "start_time": "09:00",
+                },
+                {
+                    "title": "Dinner",
+                    "scheduled_for": "2026-08-04",
+                    "start_time": "18:30",
+                },
+            ],
+        )]),
+        _FakeResp("end_turn", [_text("I added both clear planner entries.")]),
+    ])
+    out = agent.run_copilot(
+        SENTINEL_SESSION,
+        [{"role": "user", "content": "Add this planner to my calendar"}],
+        client=client,
+    )
+
+    assert seen["events"][0]["scheduled_for"] == date(2026, 8, 3)
+    assert out["actions"] == [
+        "Created event Dentist",
+        "Created event Dinner",
+    ]
+    assert out["refresh"] is True
+
+
+def test_multimodal_user_content_is_preserved_for_orchestrator():
+    content = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": "abc",
+            },
+        },
+        {"type": "text", "text": "Read my planner"},
+    ]
+    client = _FakeClient([
+        _FakeResp("end_turn", [_text("I can read it.")]),
+    ])
+
+    agent.run_copilot(
+        SENTINEL_SESSION,
+        [{"role": "user", "content": content}],
+        client=client,
+    )
+
+    assert client.messages.calls[0]["messages"][0]["content"] == content
+
+
+def test_integration_approval_requires_explicit_current_turn():
+    client = _FakeClient([
+        _FakeResp("tool_use", [_tool_use(
+            "t1",
+            "approve_integration_proposal",
+            proposal_id="proposal-1",
+        )]),
+        _FakeResp("end_turn", [_text("I still need explicit approval.")]),
+    ])
+
+    out = agent.run_copilot(
+        SENTINEL_SESSION,
+        [{"role": "user", "content": "yes, that looks fine"}],
+        client=client,
+    )
+
+    result = client.messages.calls[1]["messages"][-1]["content"][0]
+    assert "explicitly say approve or install" in result["content"]
+    assert out["actions"] == []
+
+
+def test_explicit_integration_approval_installs_and_binds(monkeypatch):
+    monkeypatch.setattr(
+        agent.integration_proposals,
+        "approve_proposal",
+        lambda session, proposal_id, body: SimpleNamespace(
+            id=proposal_id,
+            goal_id=12,
+            provider_id=4,
+        ),
+    )
+    monkeypatch.setattr(
+        agent.integration_bindings,
+        "create_binding_from_proposal",
+        lambda session, proposal_id: SimpleNamespace(id=7, goal_id=12),
+    )
+    client = _FakeClient([
+        _FakeResp("tool_use", [_tool_use(
+            "t1",
+            "approve_integration_proposal",
+            proposal_id="proposal-1",
+        )]),
+        _FakeResp("end_turn", [_text("Approved and connected.")]),
+    ])
+
+    out = agent.run_copilot(
+        SENTINEL_SESSION,
+        [{"role": "user", "content": "Approve proposal-1"}],
+        client=client,
+    )
+
+    assert out["actions"] == [
+        "Approved integration proposal proposal-1",
+        "Connected API tracking to goal 12",
+    ]
 
 
 def test_configures_dashboard():

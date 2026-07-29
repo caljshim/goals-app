@@ -158,9 +158,9 @@ def _event_times(start_time: str | None, end_time: str | None) -> tuple[str | No
     return start, end
 
 
-def create_event(session: Session, data: dict) -> dict:
+def _event_from_data(data: dict) -> CalendarEvent:
     start, end = _event_times(data.get("start_time"), data.get("end_time"))
-    event = CalendarEvent(
+    return CalendarEvent(
         title=_clean_title(data.get("title")),
         scheduled_for=data["scheduled_for"],
         start_time=start,
@@ -168,10 +168,55 @@ def create_event(session: Session, data: dict) -> dict:
         location=_clean_notes(data.get("location")),
         notes=_clean_notes(data.get("notes")),
     )
+
+
+def create_event(session: Session, data: dict) -> dict:
+    event = _event_from_data(data)
     session.add(event)
     session.commit()
     session.refresh(event)
     return event_to_read(event)
+
+
+def create_events(session: Session, items: list[dict]) -> dict:
+    if not items:
+        raise ValueError("events must not be empty")
+    if len(items) > 50:
+        raise ValueError("at most 50 events can be created at once")
+
+    candidates = [_event_from_data(item) for item in items]
+    existing = {
+        (
+            event.title.casefold(),
+            event.scheduled_for,
+            event.start_time,
+            event.end_time,
+        )
+        for event in session.exec(select(CalendarEvent)).all()
+    }
+    created: list[CalendarEvent] = []
+    skipped: list[str] = []
+    seen = set(existing)
+    for event in candidates:
+        key = (
+            event.title.casefold(),
+            event.scheduled_for,
+            event.start_time,
+            event.end_time,
+        )
+        if key in seen:
+            skipped.append(event.title)
+            continue
+        seen.add(key)
+        session.add(event)
+        created.append(event)
+    session.commit()
+    for event in created:
+        session.refresh(event)
+    return {
+        "created": [event_to_read(event) for event in created],
+        "skipped_duplicates": skipped,
+    }
 
 
 def list_events(

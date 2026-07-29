@@ -49,7 +49,21 @@ export interface Summary {
   budget_progress: BudgetProgress[];
   complete_months: string[];
 }
-export interface ChatMessage { role: "user" | "assistant"; content: string; }
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  attachment_ids?: string[];
+}
+export interface MediaAsset {
+  id: string;
+  filename: string;
+  media_type: string;
+  byte_size: number;
+  width: number;
+  height: number;
+  sha256: string;
+  created_at: string;
+}
 export interface DashboardUiAction {
   type: "dashboard.set_widgets" | "dashboard.add_widgets" | "dashboard.remove_widgets" | "dashboard.clear_widgets" | "dashboard.reset_widgets";
   widget_ids?: string[];

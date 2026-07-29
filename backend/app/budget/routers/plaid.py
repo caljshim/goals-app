@@ -16,6 +16,7 @@ from app.budget.plaid_client import (
 from app.budget.schemas import ExchangeRequest
 from app.budget.services.goals import record_financial_goal_snapshots
 from app.budget.services.sync import reconcile_item_duplicates, sync_item
+from app.perf import timed
 
 router = APIRouter(prefix="/api", tags=["plaid"])
 
@@ -179,6 +180,11 @@ def refresh(session: Session = Depends(get_session)):
 
 @router.post("/plaid/sync")
 def sync(session: Session = Depends(get_session)):
+    with timed("plaid.sync.endpoint"):
+        return _sync(session)
+
+
+def _sync(session: Session):
     client = get_client()
     totals = {"added": 0, "modified": 0, "removed": 0, "deduplicated": 0}
     for item in session.exec(select(PlaidItem)).all():
