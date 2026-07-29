@@ -438,7 +438,7 @@ struct CategorizeUnbudgetedJobBody: Encodable {
     @Published var goalCelebration: Goal?
     @Published var portfolio: Portfolio?
     @Published var messages: [ChatMessage] = ChatStorage.load() { didSet { ChatStorage.save(messages) } }
-    @Published var loading = false; @Published var error: String?; @Published var copilotPresented = false
+    @Published var loading = false; @Published var error: String?
     @Published var bankRefreshNotice: String?
     @Published private(set) var financeRefreshInFlight = false
     @Published private(set) var copilotRequestInFlight = false
@@ -1596,16 +1596,19 @@ struct ContentView: View {
                 .tag("finances")
             NavigationStack { GoalsView() }.tabItem { Label("Goals", systemImage: "target") }.tag("goals")
             NavigationStack { ScheduleView() }.tabItem { Label("Schedule", systemImage: "calendar") }.tag("routines")
+            NavigationStack {
+                CopilotView()
+                    .navigationTitle("Audel")
+                    .navigationBarTitleDisplayMode(.inline)
+            }
+            .tabItem { Label("Audel", systemImage: "sparkles") }
+            .tag("audel")
             // Invest tab hidden for now (2026-07-28). Restore this line to bring it back.
             // NavigationStack { InvestView() }.tabItem { Label("Invest", systemImage: "chart.line.uptrend.xyaxis") }.tag("invest")
         }
         .environmentObject(store)
         .tint(Theme.brand)
         .dynamicTypeSize(.small)
-        .onAppear {
-            // The Invest tab is hidden; don't leave selection stranded on a missing tab.
-            if selection == "invest" { selection = "dashboard" }
-        }
         .task {
             guard loadsRemoteData else { return }
             await store.loadOnLaunch()
@@ -1614,19 +1617,8 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            let validTabs = ["dashboard", "finances", "goals", "routines", "invest"]
+            let validTabs = ["dashboard", "finances", "goals", "routines", "audel"]
             if !validTabs.contains(selection) { selection = "dashboard" }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            Button { store.copilotPresented = true } label: {
-                HStack(spacing: 6) { Image(systemName: "sparkles"); Text("Ask Audel") }
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.onBrand)
-                    .padding(.horizontal, 16).padding(.vertical, 12)
-                    .background(Theme.brand, in: Capsule())
-                    .shadow(color: Theme.brand.opacity(0.35), radius: 10, y: 4)
-            }
-            .padding(.trailing, 18).padding(.bottom, 64)
         }
         .overlay {
             if !hasCompletedInitialLoad {
@@ -1637,7 +1629,6 @@ struct ContentView: View {
                     .environmentObject(store)
             }
         }
-        .sheet(isPresented: $store.copilotPresented) { CopilotView().environmentObject(store).tint(Theme.brand).dynamicTypeSize(.small).presentationDragIndicator(.visible) }
         .alert("Something went wrong", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) { Button("OK") { store.error = nil } } message: { Text(store.error ?? "") }
     }
 }
