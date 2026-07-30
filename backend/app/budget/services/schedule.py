@@ -52,6 +52,7 @@ def reminder_to_read(reminder: Reminder) -> dict:
         "completed": reminder.completed_at is not None,
         "repeat_until_completed": reminder.repeat_until_completed,
         "nudge_interval_minutes": reminder.nudge_interval_minutes,
+        "important": reminder.important,
         "created_at": reminder.created_at,
     }
 
@@ -86,6 +87,7 @@ def create_reminder(session: Session, data: dict) -> dict:
         notes=_clean_notes(data.get("notes")),
         repeat_until_completed=persistent,
         nudge_interval_minutes=interval,
+        important=bool(data.get("important", False)),
     )
     session.add(reminder)
     session.commit()
@@ -118,6 +120,8 @@ def update_reminder(session: Session, reminder_id: int, data: dict) -> dict | No
         persistent, interval = _nudge_policy(data, reminder)
         reminder.repeat_until_completed = persistent
         reminder.nudge_interval_minutes = interval
+    if "important" in data and data["important"] is not None:
+        reminder.important = bool(data["important"])
     if "completed" in data:
         reminder.completed_at = datetime.utcnow() if data["completed"] else None
     session.add(reminder)
@@ -306,6 +310,7 @@ def list_schedule(session: Session, start: date, end: date) -> list[dict]:
             "notes": reminder.notes, "period": None,
             "repeat_until_completed": reminder.repeat_until_completed,
             "nudge_interval_minutes": reminder.nudge_interval_minutes,
+            "important": reminder.important,
             "end_time": None, "location": None,
         })
 
@@ -338,6 +343,7 @@ def list_schedule(session: Session, start: date, end: date) -> list[dict]:
                     "period": goal.period,
                     "repeat_until_completed": goal.repeat_until_completed,
                     "nudge_interval_minutes": goal.nudge_interval_minutes,
+                    "important": goal.important,
                     "end_time": None, "location": None,
                 })
 
