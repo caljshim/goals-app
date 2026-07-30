@@ -81,6 +81,21 @@ enum ReminderNotificationScheduler {
 
     static func schedule(_ reminder: Reminder, requestAuthorization: Bool) async {
         await cancel(reminderId: reminder.id)
+        // An "important" reminder rings like a real alarm (iOS 26+) instead of a
+        // silent-respecting notification. The alarm replaces the notification so
+        // it doesn't fire twice.
+        if #available(iOS 26.0, *),
+           reminder.important, !reminder.completed,
+           let time = reminder.reminderTime,
+           let fireDate = dueDate(day: reminder.scheduledFor, time: time),
+           fireDate > Date() {
+            await ReminderAlarm.scheduleOnce(
+                id: ReminderAlarmID.make(source: "reminder", sourceId: reminder.id),
+                title: reminder.title,
+                at: fireDate
+            )
+            return
+        }
         guard !reminder.completed,
               reminder.reminderTime != nil,
               await isAuthorized(requestIfNeeded: requestAuthorization) else { return }
@@ -98,6 +113,9 @@ enum ReminderNotificationScheduler {
 
     static func cancel(reminderId: Int) async {
         await cancel(prefix: prefix(source: "reminder", sourceId: reminderId))
+        if #available(iOS 26.0, *) {
+            ReminderAlarm.cancel(id: ReminderAlarmID.make(source: "reminder", sourceId: reminderId))
+        }
     }
 
     static func cancel(source: String, sourceId: Int) async {
@@ -386,6 +404,7 @@ final class ReminderNotificationDelegate: NSObject, UIApplicationDelegate, UNUse
                         period: "routine",
                         repeatUntilCompleted: true,
                         nudgeIntervalMinutes: interval,
+                        important: false,
                         endTime: nil,
                         location: nil
                     )
@@ -441,8 +460,8 @@ final class ReminderNotificationDelegate: NSObject, UIApplicationDelegate, UNUse
 /// persisting a lookup table. Available on all OS versions so cancel paths work
 /// even though scheduling is iOS 26+.
 enum ReminderAlarmID {
-    static func make(source: String, sourceId: Int, scheduledFor: String) -> UUID {
-        let key = "audel-alarm-\(source)-\(sourceId)-\(scheduledFor)"
+    static func make(source: String, sourceId: Int) -> UUID {
+        let key = "audel-alarm-\(source)-\(sourceId)"
         let digest = SHA256.hash(data: Data(key.utf8))
         var bytes = Array(digest.prefix(16))
         bytes[6] = (bytes[6] & 0x0F) | 0x50  // version 5

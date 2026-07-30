@@ -608,6 +608,7 @@ struct AddReminderView: View {
     @State private var notes = ""
     @State private var repeatUntilCompleted = false
     @State private var nudgeIntervalMinutes = 60
+    @State private var important = false
     @State private var saving = false
     @State private var confirmingDelete = false
 
@@ -627,6 +628,7 @@ struct AddReminderView: View {
         _notes = State(initialValue: item.notes ?? "")
         _repeatUntilCompleted = State(initialValue: item.repeatUntilCompleted)
         _nudgeIntervalMinutes = State(initialValue: item.nudgeIntervalMinutes ?? 60)
+        _important = State(initialValue: item.important)
     }
 
     var body: some View {
@@ -638,13 +640,26 @@ struct AddReminderView: View {
                     Toggle("Add a time", isOn: $includesTime)
                     if includesTime {
                         DatePicker("Time", selection: $reminderTime, displayedComponents: .hourAndMinute)
-                        Toggle("Keep reminding me until I stop it", isOn: $repeatUntilCompleted)
-                        if repeatUntilCompleted {
-                            Picker("Nudge me", selection: $nudgeIntervalMinutes) {
-                                Text("Every 30 minutes").tag(30)
-                                Text("Every hour").tag(60)
-                                Text("Every 2 hours").tag(120)
-                                Text("Every 4 hours").tag(240)
+                        Toggle(isOn: $important) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Important")
+                                Text("Rings like an alarm — breaks through silent & Focus")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        if important, #unavailable(iOS 26.0) {
+                            Text("On this iOS version, important reminders use repeated alerts instead of a true alarm.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        if !important {
+                            Toggle("Keep reminding me until I stop it", isOn: $repeatUntilCompleted)
+                            if repeatUntilCompleted {
+                                Picker("Nudge me", selection: $nudgeIntervalMinutes) {
+                                    Text("Every 30 minutes").tag(30)
+                                    Text("Every hour").tag(60)
+                                    Text("Every 2 hours").tag(120)
+                                    Text("Every 4 hours").tag(240)
+                                }
                             }
                         }
                     }
@@ -696,8 +711,9 @@ struct AddReminderView: View {
                     date: scheduledDate.apiDate,
                     time: includesTime ? reminderTime.apiTime : nil,
                     notes: cleanNotes,
-                    repeatUntilCompleted: includesTime && repeatUntilCompleted,
-                    nudgeIntervalMinutes: includesTime && repeatUntilCompleted ? nudgeIntervalMinutes : nil
+                    repeatUntilCompleted: includesTime && !important && repeatUntilCompleted,
+                    nudgeIntervalMinutes: includesTime && !important && repeatUntilCompleted ? nudgeIntervalMinutes : nil,
+                    important: includesTime && important
                 )
             } else {
                 saved = await store.createReminder(
@@ -705,8 +721,9 @@ struct AddReminderView: View {
                     date: scheduledDate.apiDate,
                     time: includesTime ? reminderTime.apiTime : nil,
                     notes: cleanNotes,
-                    repeatUntilCompleted: includesTime && repeatUntilCompleted,
-                    nudgeIntervalMinutes: includesTime && repeatUntilCompleted ? nudgeIntervalMinutes : nil
+                    repeatUntilCompleted: includesTime && !important && repeatUntilCompleted,
+                    nudgeIntervalMinutes: includesTime && !important && repeatUntilCompleted ? nudgeIntervalMinutes : nil,
+                    important: includesTime && important
                 )
             }
             saving = false

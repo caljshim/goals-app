@@ -89,6 +89,7 @@ struct Reminder: Codable, Identifiable {
     let completed: Bool
     let repeatUntilCompleted: Bool
     let nudgeIntervalMinutes: Int?
+    let important: Bool
     let createdAt: String
 }
 struct CalendarEvent: Codable, Identifiable {
@@ -106,6 +107,7 @@ struct ScheduleItem: Codable, Identifiable {
     let notes, period: String?
     let repeatUntilCompleted: Bool
     let nudgeIntervalMinutes: Int?
+    let important: Bool
     let endTime, location: String?
 }
 struct Position: Codable, Identifiable {
@@ -406,16 +408,18 @@ struct ReminderCreateBody: Encodable {
     let reminderTime, notes: String?
     let repeatUntilCompleted: Bool
     let nudgeIntervalMinutes: Int?
+    let important: Bool
 }
 struct ReminderUpdateBody: Encodable {
     let title, scheduledFor: String
     let reminderTime, notes: String?
     let repeatUntilCompleted: Bool
     let nudgeIntervalMinutes: Int?
+    let important: Bool
 
     enum CodingKeys: String, CodingKey {
         case title, scheduledFor, reminderTime, notes
-        case repeatUntilCompleted, nudgeIntervalMinutes
+        case repeatUntilCompleted, nudgeIntervalMinutes, important
     }
 
     func encode(to encoder: Encoder) throws {
@@ -426,6 +430,7 @@ struct ReminderUpdateBody: Encodable {
         try container.encode(notes, forKey: .notes)
         try container.encode(repeatUntilCompleted, forKey: .repeatUntilCompleted)
         try container.encode(nudgeIntervalMinutes, forKey: .nudgeIntervalMinutes)
+        try container.encode(important, forKey: .important)
     }
 }
 struct ReminderCompletionBody: Encodable { let completed: Bool }
@@ -599,7 +604,8 @@ struct CategorizeUnbudgetedJobBody: Encodable {
         time: String?,
         notes: String?,
         repeatUntilCompleted: Bool,
-        nudgeIntervalMinutes: Int?
+        nudgeIntervalMinutes: Int?,
+        important: Bool = false
     ) async -> Reminder? {
         do {
             let reminder: Reminder = try await api.request(
@@ -610,7 +616,8 @@ struct CategorizeUnbudgetedJobBody: Encodable {
                     reminderTime: time,
                     notes: notes,
                     repeatUntilCompleted: repeatUntilCompleted,
-                    nudgeIntervalMinutes: nudgeIntervalMinutes
+                    nudgeIntervalMinutes: nudgeIntervalMinutes,
+                    important: important
                 ))
             )
             await ReminderNotificationScheduler.schedule(reminder, requestAuthorization: time != nil)
@@ -701,7 +708,8 @@ struct CategorizeUnbudgetedJobBody: Encodable {
         time: String?,
         notes: String?,
         repeatUntilCompleted: Bool,
-        nudgeIntervalMinutes: Int?
+        nudgeIntervalMinutes: Int?,
+        important: Bool = false
     ) async -> Reminder? {
         guard item.source == "reminder" else { return nil }
         do {
@@ -714,7 +722,8 @@ struct CategorizeUnbudgetedJobBody: Encodable {
                     reminderTime: time,
                     notes: notes,
                     repeatUntilCompleted: repeatUntilCompleted,
-                    nudgeIntervalMinutes: nudgeIntervalMinutes
+                    nudgeIntervalMinutes: nudgeIntervalMinutes,
+                    important: important
                 ))
             )
             await ReminderNotificationScheduler.cancel(reminderId: item.sourceId)
