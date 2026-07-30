@@ -5,6 +5,7 @@ from app.budget.db import get_session
 from app.budget.schemas import ChatRequest, ChatResponse
 from app.copilot.agent import run_copilot
 from app.media.service import (
+    MAX_CHAT_IMAGES,
     MediaError,
     MediaNotFound,
     image_content_block,
@@ -23,6 +24,14 @@ def _multimodal_messages(body: ChatRequest, session: Session) -> list[dict]:
                 detail="Only user messages can contain image attachments",
             )
         asset_ids.extend(message.attachment_ids)
+    if len(asset_ids) > MAX_CHAT_IMAGES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"A chat request can contain at most "
+                f"{MAX_CHAT_IMAGES} images"
+            ),
+        )
     unique_ids = list(dict.fromkeys(asset_ids))
     try:
         assets = {

@@ -16,6 +16,15 @@ executes a connector.
    Rejecting a proposal never installs anything.
 5. A reviewer can replace a draft manifest before approval. Reviewed proposals
    are immutable.
+6. An installed operation can be bound to one numeric goal. Executions append
+   normalized measurements; goal progress is calculated from the current goal
+   period using `sum`, `latest`, `average`, or `count`.
+
+Audel exposes this lifecycle through Copilot tools. Research remains a proposal
+until the user's current message explicitly approves installation. Approval can
+install and bind a proposal in one turn; later manual, barcode, or image-driven
+runs execute the binding and add a measurement. `scheduled` is stored as a
+trigger preference, but no background scheduler is included yet.
 
 ## Phase-one safety contract
 
@@ -45,6 +54,10 @@ executes a connector.
 - `PUT /api/integrations/proposals/{proposal_id}/manifest`
 - `POST /api/integrations/proposals/{proposal_id}/approve`
 - `POST /api/integrations/proposals/{proposal_id}/reject`
+- `GET /api/integrations/bindings`
+- `POST /api/integrations/bindings`
+- `POST /api/integrations/proposals/{proposal_id}/binding`
+- `POST /api/integrations/bindings/{binding_id}/execute`
 - `POST /api/integrations/execute`
 - `GET /api/integrations/runs/{run_id}`
 - `POST /api/integrations/measurements`

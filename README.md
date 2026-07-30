@@ -10,6 +10,9 @@ One personal-finance app with two domains and a unified AI copilot:
 - **Auto-integrations** — web-researched connector proposals with explicit
   approval, safe read-only execution, JSONB auditing, and normalized goal
   measurements.
+- **Photo input** — reusable PostgreSQL-backed image uploads for Copilot. A
+  planner photo can become a validated batch of calendar events, and images can
+  also provide context for goals, food, receipts, or future workflows.
 
 Formed by merging the former `finance/` and `investor/` apps into one FastAPI backend
 (separate routers per domain) and one React frontend.
@@ -21,7 +24,8 @@ backend/app/
   budget/    Plaid budgeting (models, db, categories, plaid_client, schemas, routers, services)
   invest/    tastytrade read-only (tasty.py, portfolio router, investing specialist)
   copilot/   orchestrator agent + /api/assistant/chat (delegates to the two specialists)
-  auto_integration/ researched proposals + review + safe GET execution + measurements
+  auto_integration/ researched proposals + goal bindings + safe GET execution + measurements
+  media/     normalized private image uploads + multimodal Copilot content
   config.py  merged settings   main.py  wires all routers
 frontend/    React + Vite: Dashboard / Transactions / Accounts / Budgets / Invest + CopilotChat
 ```

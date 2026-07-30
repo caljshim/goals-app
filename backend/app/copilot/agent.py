@@ -11,6 +11,7 @@ from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import anthropic
+from sqlalchemy import func
 from sqlmodel import select
 
 from app.auto_integration import bindings as integration_bindings
@@ -537,7 +538,7 @@ def _resolve_goal(session, tool_input: dict) -> Goal | None:
     matches = session.exec(
         select(Goal).where(
             Goal.archived_at.is_(None),
-            Goal.name.ilike(goal_name),
+            func.lower(Goal.name) == goal_name.lower(),
         )
     ).all()
     return matches[0] if len(matches) == 1 else None

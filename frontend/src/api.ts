@@ -82,7 +82,7 @@ export const api = {
   uploadImage: (file: File) =>
     http.post<MediaAsset>("/media", file, {
       headers: {
-        "Content-Type": file.type || "application/octet-stream",
+        "Content-Type": file.type || "image/jpeg",
         "X-Filename": file.name.replace(/[^\x20-\x7E]/g, "_"),
       },
     }).then((r) => r.data),

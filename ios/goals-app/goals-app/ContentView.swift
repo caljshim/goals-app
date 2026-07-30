@@ -3968,6 +3968,9 @@ struct CopilotView: View {
     @State private var visibleMessageCount = 5
     @State private var didInitialScroll = false
     @State private var loadingEarlierMessages = false
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
+    @State private var pendingAttachments: [MediaAsset] = []
+    @State private var uploadingImages = false
     @State private var topTriggerOffset = -CGFloat.greatestFiniteMagnitude
     @State private var historyLoadArmed = false
     @State private var handledHistoryLoadForDrag = false
@@ -4009,6 +4012,7 @@ struct CopilotView: View {
                 Spacer()
                 Button {
                     cancelEditing()
+                    pendingAttachments = []
                     store.clearChat()
                 } label: {
                     Label("New chat", systemImage: "square.and.pencil")
@@ -4156,6 +4160,35 @@ struct CopilotView: View {
 
     private var composer: some View {
         VStack(spacing: 8) {
+            if !pendingAttachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(pendingAttachments) { asset in
+                            HStack(spacing: 5) {
+                                Image(systemName: "photo")
+                                Text(asset.filename)
+                                    .lineLimit(1)
+                                Button {
+                                    pendingAttachments.removeAll {
+                                        $0.id == asset.id
+                                    }
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(
+                                    "Remove \(asset.filename)"
+                                )
+                            }
+                            .font(.caption)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 6)
+                            .background(Theme.card)
+                            .clipShape(Capsule())
+                        }
+                    }
+                }
+            }
             if editingMessageId != nil {
                 HStack {
                     Label("Editing prompt", systemImage: "pencil")
@@ -4167,6 +4200,32 @@ struct CopilotView: View {
                 }
             }
             HStack {
+                PhotosPicker(
+                    selection: $selectedPhotoItems,
+                    maxSelectionCount: max(
+                        1,
+                        4 - pendingAttachments.count
+                    ),
+                    matching: .images
+                ) {
+                    if uploadingImages {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "photo.badge.plus")
+                            .font(.title3)
+                    }
+                }
+                .disabled(
+                    sending
+                    || uploadingImages
+                    || editingMessageId != nil
+                    || pendingAttachments.count >= 4
+                )
+                .accessibilityLabel("Attach photos")
+                .onChange(of: selectedPhotoItems) { items in
+                    guard !items.isEmpty else { return }
+                    Task { await uploadSelectedImages(items) }
+                }
                 TextField("Ask anything", text: $input, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .focused($inputFocused)
@@ -4177,7 +4236,16 @@ struct CopilotView: View {
                         .foregroundStyle(Theme.brand)
                         .accessibilityLabel(editingMessageId == nil ? "Send" : "Save and resend")
                 }
-                .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || sending)
+                .disabled(
+                    (
+                        input.trimmingCharacters(
+                            in: .whitespacesAndNewlines
+                        ).isEmpty
+                        && pendingAttachments.isEmpty
+                    )
+                    || sending
+                    || uploadingImages
+                )
             }
         }
         .padding()
@@ -4186,6 +4254,7 @@ struct CopilotView: View {
 
     private func beginEditing(_ message: ChatMessage) {
         guard !sending else { return }
+        pendingAttachments = []
         editingMessageId = message.id
         input = message.content
         inputFocused = true
@@ -4199,16 +4268,46 @@ struct CopilotView: View {
 
     private func submit(_ text: String) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty, !sending else { return }
+        guard (!clean.isEmpty || !pendingAttachments.isEmpty),
+              !sending,
+              !uploadingImages else { return }
         let messageId = editingMessageId
+        let attachmentIds = pendingAttachments.map(\.id)
         input = ""
         editingMessageId = nil
+        pendingAttachments = []
         scrollRequest &+= 1
         Task {
             if let messageId {
                 await store.regenerate(from: messageId, replacement: clean)
             } else {
-                await store.send(clean)
+                await store.send(clean, attachmentIds: attachmentIds)
+            }
+        }
+    }
+
+    @MainActor
+    private func uploadSelectedImages(_ items: [PhotosPickerItem]) async {
+        uploadingImages = true
+        selectedPhotoItems = []
+        defer { uploadingImages = false }
+        for item in items.prefix(max(0, 4 - pendingAttachments.count)) {
+            do {
+                guard let source = try await item.loadTransferable(
+                    type: Data.self
+                ),
+                let image = UIImage(data: source),
+                let jpeg = image.jpegData(compressionQuality: 0.9) else {
+                    throw APIError.server("That photo could not be decoded.")
+                }
+                let asset = try await store.uploadImage(
+                    jpeg,
+                    filename: "audel-photo-\(UUID().uuidString).jpg"
+                )
+                pendingAttachments.append(asset)
+            } catch {
+                store.error = error.localizedDescription
+                return
             }
         }
     }
@@ -4294,6 +4393,15 @@ struct CopilotMessageRow: View {
 
     private var messageBubble: some View {
         VStack(alignment: .leading, spacing: 5) {
+            if let attachmentIds = message.attachmentIds,
+               !attachmentIds.isEmpty {
+                Label(
+                    "\(attachmentIds.count) image\(attachmentIds.count == 1 ? "" : "s")",
+                    systemImage: "photo"
+                )
+                .font(.caption)
+                .foregroundStyle(isUser ? Theme.onBrand.opacity(0.8) : .secondary)
+            }
             CopilotMarkdownText(content: message.content)
             ForEach(visibleActions, id: \.self) { action in
                 Label(action, systemImage: "checkmark")

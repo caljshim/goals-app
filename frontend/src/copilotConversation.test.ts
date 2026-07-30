@@ -27,4 +27,24 @@ describe("branchConversation", () => {
     expect(branchConversation(conversation, "a1", undefined, "x")).toBeNull();
     expect(branchConversation(conversation, "u1", "   ", "x")).toBeNull();
   });
+
+  it("preserves image attachments when resending a user turn", () => {
+    const withImage: CopilotMessage[] = [
+      {
+        id: "u1",
+        role: "user",
+        content: "Read my planner",
+        attachment_ids: ["image-1"],
+      },
+      { id: "a1", role: "assistant", content: "I found two events." },
+    ];
+    expect(branchConversation(withImage, "u1", undefined, "u2")).toEqual([
+      {
+        id: "u2",
+        role: "user",
+        content: "Read my planner",
+        attachment_ids: ["image-1"],
+      },
+    ]);
+  });
 });

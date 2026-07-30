@@ -71,7 +71,7 @@ def image_content(
         media_type=asset.media_type,
         headers={
             "Content-Disposition": (
-                f"inline; filename*=UTF-8''{quote(asset.filename)}.jpg"
+                f"inline; filename*=UTF-8''{quote(asset.filename)}"
             ),
             "Cache-Control": "private, max-age=3600",
         },

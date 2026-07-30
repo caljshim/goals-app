@@ -29,7 +29,7 @@ def _upload(client):
 def test_image_upload_is_normalized_and_retrievable(client, engine):
     asset = _upload(client)
 
-    assert asset["filename"] == "planner.png"
+    assert asset["filename"] == "planner.jpg"
     assert asset["media_type"] == "image/jpeg"
     assert (asset["width"], asset["height"]) == (80, 40)
     assert asset["byte_size"] > 0
@@ -129,3 +129,23 @@ def test_chat_rejects_missing_or_assistant_owned_images(client):
         },
     )
     assert assistant_image.status_code == 422
+
+
+def test_chat_limits_total_image_occurrences(client):
+    asset = _upload(client)
+    response = client.post(
+        "/api/assistant/chat",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"Image {index}",
+                    "attachment_ids": [asset["id"]],
+                }
+                for index in range(5)
+            ]
+        },
+    )
+
+    assert response.status_code == 422
+    assert "at most 4 images" in response.json()["detail"]

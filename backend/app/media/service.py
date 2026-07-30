@@ -32,7 +32,8 @@ def _clean_filename(value: str | None) -> str:
     filename = Path(value or "upload").name.strip()
     if not filename:
         filename = "upload"
-    return filename[:240]
+    stem = Path(filename).stem.strip() or "upload"
+    return f"{stem[:236]}.jpg"
 
 
 def normalize_image(raw: bytes) -> tuple[bytes, int, int]:

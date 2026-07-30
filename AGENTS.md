@@ -33,8 +33,10 @@
   - `app/copilot/` — orchestrator `agent.py` (tools `ask_budgeting`/`ask_investing`) +
     `router.py` serving the single `/api/assistant/chat`.
   - `app/auto_integration/` — agent-researched connector proposals with explicit
-    approval, safe read-only HTTP execution, JSONB audit history, and normalized
-    goal measurements.
+    approval, goal bindings, safe read-only HTTP execution, JSONB audit history,
+    and normalized goal measurements.
+  - `app/media/` — normalized private image uploads used by multimodal Copilot
+    messages and planner-to-calendar ingestion.
   - `app/config.py` — merged Settings (Plaid + tastytrade + Anthropic). One `.env`.
   - `app/main.py` — wires all routers.
 - Frontend: React + Vite in `frontend/`, port 5273 (proxy targets 127.0.0.1:8100 —
