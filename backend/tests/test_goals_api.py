@@ -13,6 +13,24 @@ def _account(session, **kw):
     return a
 
 
+def test_routine_goal_important_round_trips(client, session):
+    created = client.post("/api/goals", json={
+        "name": "Meds", "kind": "numeric", "target": 1, "period": "daily",
+        "reminder_time": "08:00", "important": True,
+    })
+    assert created.status_code == 201
+    goal = created.json()
+    assert goal["important"] is True
+    assert client.get("/api/goals").json()[0]["important"] is True
+    updated = client.patch(f"/api/goals/{goal['id']}", json={"important": False})
+    assert updated.status_code == 200 and updated.json()["important"] is False
+
+
+def test_goal_defaults_to_not_important(client, session):
+    created = client.post("/api/goals", json={"name": "Trip", "kind": "save", "target": 2000})
+    assert created.status_code == 201 and created.json()["important"] is False
+
+
 def test_create_and_list_goal(client, session):
     resp = client.post("/api/goals", json={"name": "Trip", "kind": "save", "target": 2000, "current": 900})
     assert resp.status_code == 201

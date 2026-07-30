@@ -256,6 +256,7 @@ def _base_fields(g: Goal, account_links: dict[int, list[int]] | None = None,
         "reminder_time": g.reminder_time,
         "repeat_until_completed": g.repeat_until_completed,
         "nudge_interval_minutes": g.nudge_interval_minutes,
+        "important": g.important,
         "reset_time": g.reset_time, "weekly_reset_day": g.weekly_reset_day,
         "monthly_reset_day": g.monthly_reset_day, "interval_days": g.interval_days,
         "archived_at": g.archived_at,
@@ -587,6 +588,7 @@ def create_goal(session: Session, data: dict) -> Goal:
         reminder_time=reminder_time,
         repeat_until_completed=repeat_until_completed,
         nudge_interval_minutes=nudge_interval_minutes,
+        important=bool(data.get("important", False)),
         reset_time=reset_time, weekly_reset_day=weekly_reset_day,
         monthly_reset_day=monthly_reset_day, interval_days=interval_days,
         step=(data.get("step") or 1.0), group=((data.get("group") or "").strip() or None),
@@ -616,7 +618,7 @@ def create_goal(session: Session, data: dict) -> Goal:
     return goal
 
 
-_EDITABLE = ("name", "target", "account_id", "category", "deadline", "group", "period", "weekly_day", "reminder_time", "repeat_until_completed", "nudge_interval_minutes", "reset_time", "weekly_reset_day", "monthly_reset_day", "interval_days", "direction", "step", "financial_metric", "financial_rule", "financial_source", "icon", "color")
+_EDITABLE = ("name", "target", "account_id", "category", "deadline", "group", "period", "weekly_day", "reminder_time", "repeat_until_completed", "nudge_interval_minutes", "important", "reset_time", "weekly_reset_day", "monthly_reset_day", "interval_days", "direction", "step", "financial_metric", "financial_rule", "financial_source", "icon", "color")
 
 
 def update_goal(session: Session, goal_id: int, data: dict) -> Goal | None:

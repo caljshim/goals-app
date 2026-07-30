@@ -126,6 +126,7 @@ class GoalCreate(BaseModel):
     reminder_time: Optional[str] = None
     repeat_until_completed: bool = False
     nudge_interval_minutes: Optional[int] = None
+    important: bool = False
     reset_time: Optional[str] = None
     weekly_reset_day: Optional[str] = None
     monthly_reset_day: Optional[int] = None
@@ -152,6 +153,7 @@ class GoalUpdate(BaseModel):
     reminder_time: Optional[str] = None
     repeat_until_completed: Optional[bool] = None
     nudge_interval_minutes: Optional[int] = None
+    important: Optional[bool] = None
     reset_time: Optional[str] = None
     weekly_reset_day: Optional[str] = None
     monthly_reset_day: Optional[int] = None
@@ -323,6 +325,7 @@ class GoalRead(BaseModel):
     reminder_time: Optional[str] = None
     repeat_until_completed: bool = False
     nudge_interval_minutes: Optional[int] = None
+    important: bool = False
     reset_time: str = "00:00"
     weekly_reset_day: str = "sunday"
     monthly_reset_day: int = 1
