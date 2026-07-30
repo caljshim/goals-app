@@ -35,6 +35,8 @@
 	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSAlarmKitUsageDescription</key>
+	<string>Audel uses alarms so your important reminders ring even when your phone is on silent or in Focus.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

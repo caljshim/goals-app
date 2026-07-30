@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import UIKit
 import UserNotifications
@@ -433,3 +434,91 @@ final class ReminderNotificationDelegate: NSObject, UIApplicationDelegate, UNUse
         }
     }
 }
+
+// MARK: - AlarmKit (important reminders ring like an alarm)
+
+/// Deterministic alarm identifier so scheduling and cancellation agree without
+/// persisting a lookup table. Available on all OS versions so cancel paths work
+/// even though scheduling is iOS 26+.
+enum ReminderAlarmID {
+    static func make(source: String, sourceId: Int, scheduledFor: String) -> UUID {
+        let key = "audel-alarm-\(source)-\(sourceId)-\(scheduledFor)"
+        let digest = SHA256.hash(data: Data(key.utf8))
+        var bytes = Array(digest.prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x50  // version 5
+        bytes[8] = (bytes[8] & 0x3F) | 0x80  // RFC 4122 variant
+        return bytes.withUnsafeBufferPointer { NSUUID(uuidBytes: $0.baseAddress) as UUID }
+    }
+}
+
+#if canImport(AlarmKit)
+import AlarmKit
+import SwiftUI
+
+/// Empty metadata payload — reminder alarms carry no custom data.
+@available(iOS 26.0, *)
+struct ReminderAlarmMetadata: AlarmMetadata { init() {} }
+
+/// Wraps AlarmKit so an "important" reminder rings like a real alarm — breaking
+/// through silent mode and Focus — instead of a silent-respecting notification.
+/// iOS 26+ only; callers fall back to notifications on older systems.
+@available(iOS 26.0, *)
+enum ReminderAlarm {
+    static func requestAuthorization() async -> Bool {
+        switch AlarmManager.shared.authorizationState {
+        case .authorized: return true
+        case .denied: return false
+        case .notDetermined:
+            return (try? await AlarmManager.shared.requestAuthorization()) == .authorized
+        @unknown default: return false
+        }
+    }
+
+    private static func attributes(title: String) -> AlarmAttributes<ReminderAlarmMetadata> {
+        let stopButton = AlarmButton(
+            text: "Stop", textColor: .white, systemImageName: "stop.fill"
+        )
+        let alert = AlarmPresentation.Alert(
+            title: LocalizedStringResource(stringLiteral: title),
+            stopButton: stopButton
+        )
+        return AlarmAttributes(
+            presentation: AlarmPresentation(alert: alert),
+            metadata: ReminderAlarmMetadata(),
+            tintColor: Theme.brand
+        )
+    }
+
+    /// One-time alarm at a specific wall-clock date.
+    static func scheduleOnce(id: UUID, title: String, at date: Date) async {
+        guard await requestAuthorization() else { return }
+        let config = AlarmManager.AlarmConfiguration.alarm(
+            schedule: .fixed(date),
+            attributes: attributes(title: title),
+            sound: .default
+        )
+        _ = try? await AlarmManager.shared.schedule(id: id, configuration: config)
+    }
+
+    /// Recurring alarm at a time of day on the given weekdays (daily == all seven).
+    static func scheduleWeekly(
+        id: UUID, title: String, weekdays: [Locale.Weekday], hour: Int, minute: Int
+    ) async {
+        guard await requestAuthorization() else { return }
+        let relative = Alarm.Schedule.Relative(
+            time: .init(hour: hour, minute: minute),
+            repeats: weekdays.isEmpty ? .never : .weekly(weekdays)
+        )
+        let config = AlarmManager.AlarmConfiguration.alarm(
+            schedule: .relative(relative),
+            attributes: attributes(title: title),
+            sound: .default
+        )
+        _ = try? await AlarmManager.shared.schedule(id: id, configuration: config)
+    }
+
+    static func cancel(id: UUID) {
+        try? AlarmManager.shared.cancel(id: id)
+    }
+}
+#endif
