@@ -68,7 +68,7 @@ struct Goal: Codable, Identifiable {
     let target: Double?; let accountId: Int?; let category: String?; let current, anchorValue: Double?
     let accountIds: [Int]?; let financialMetric, financialRule, financialSource: String?
     let since, deadline, group, weeklyDay, reminderTime: String?; let weeklyDays: [String]
-    let repeatUntilCompleted: Bool; let nudgeIntervalMinutes: Int?
+    let repeatUntilCompleted: Bool; let nudgeIntervalMinutes: Int?; let important: Bool
     let resetTime, weeklyResetDay: String; let monthlyResetDay: Int; let intervalDays: Int?
     let currentValue: Double; let pct: Double?; let status, unit: String; let linkedLabel: String?
     let days, bestDays, weeklyStreak: Int?; let history, milestones: [HistoryPoint]
@@ -352,6 +352,7 @@ struct NewGoalBody: Encodable {
     let reminderTime: String?
     let repeatUntilCompleted: Bool
     let nudgeIntervalMinutes: Int?
+    let important: Bool
     let accountIds: [Int]?
     let financialMetric, financialRule, financialSource: String?
 }
@@ -361,8 +362,9 @@ struct RoutineScheduleBody: Encodable {
     let reminderTime: String?
     let repeatUntilCompleted: Bool
     let nudgeIntervalMinutes: Int?
+    let important: Bool
     enum CodingKeys: String, CodingKey {
-        case weeklyDays, weeklyResetDay, reminderTime, repeatUntilCompleted, nudgeIntervalMinutes
+        case weeklyDays, weeklyResetDay, reminderTime, repeatUntilCompleted, nudgeIntervalMinutes, important
     }
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -375,6 +377,7 @@ struct RoutineScheduleBody: Encodable {
         }
         try container.encode(repeatUntilCompleted, forKey: .repeatUntilCompleted)
         try container.encodeIfPresent(nudgeIntervalMinutes, forKey: .nudgeIntervalMinutes)
+        try container.encode(important, forKey: .important)
     }
 }
 struct GoalGroupUpdateBody: Encodable { let goalIds: [Int]; let name: String }
@@ -1085,9 +1088,9 @@ struct CategorizeUnbudgetedJobBody: Encodable {
             return false
         }
     }
-    func addGoal(name: String, kind: String, period: String, direction: String = "reach", target: Double?, current: Double?, step: Double, group: String?, category: String? = nil, weeklyDays: [String] = [], reminderTime: String? = nil, repeatUntilCompleted: Bool = false, nudgeIntervalMinutes: Int? = nil, accountIds: [Int] = [], financialMetric: String? = nil, financialRule: String? = nil, financialSource: String? = nil) async {
+    func addGoal(name: String, kind: String, period: String, direction: String = "reach", target: Double?, current: Double?, step: Double, group: String?, category: String? = nil, weeklyDays: [String] = [], reminderTime: String? = nil, repeatUntilCompleted: Bool = false, nudgeIntervalMinutes: Int? = nil, important: Bool = false, accountIds: [Int] = [], financialMetric: String? = nil, financialRule: String? = nil, financialSource: String? = nil) async {
         do {
-            let body = NewGoalBody(name: name, kind: kind, period: period, direction: direction, target: target, current: current, step: step, group: group, category: category, weeklyDays: period == "weekly" ? weeklyDays : nil, reminderTime: reminderTime, repeatUntilCompleted: repeatUntilCompleted, nudgeIntervalMinutes: repeatUntilCompleted ? nudgeIntervalMinutes : nil, accountIds: accountIds.isEmpty ? nil : accountIds, financialMetric: financialMetric, financialRule: financialRule, financialSource: financialSource)
+            let body = NewGoalBody(name: name, kind: kind, period: period, direction: direction, target: target, current: current, step: step, group: group, category: category, weeklyDays: period == "weekly" ? weeklyDays : nil, reminderTime: reminderTime, repeatUntilCompleted: repeatUntilCompleted, nudgeIntervalMinutes: repeatUntilCompleted ? nudgeIntervalMinutes : nil, important: important, accountIds: accountIds.isEmpty ? nil : accountIds, financialMetric: financialMetric, financialRule: financialRule, financialSource: financialSource)
             let created: Goal = try await api.request("goals", method: "POST", body: .init(body))
             goals.append(created)
             if created.period != "once" {
@@ -1238,7 +1241,8 @@ struct CategorizeUnbudgetedJobBody: Encodable {
         weekStartsOn: String,
         reminderTime: String?,
         repeatUntilCompleted: Bool,
-        nudgeIntervalMinutes: Int?
+        nudgeIntervalMinutes: Int?,
+        important: Bool = false
     ) async {
         do {
             let updated: Goal = try await api.request(
@@ -1247,8 +1251,9 @@ struct CategorizeUnbudgetedJobBody: Encodable {
                     weeklyDays: days,
                     weeklyResetDay: weekStartsOn,
                     reminderTime: reminderTime,
-                    repeatUntilCompleted: repeatUntilCompleted,
-                    nudgeIntervalMinutes: repeatUntilCompleted ? nudgeIntervalMinutes : nil
+                    repeatUntilCompleted: !important && repeatUntilCompleted,
+                    nudgeIntervalMinutes: !important && repeatUntilCompleted ? nudgeIntervalMinutes : nil,
+                    important: important
                 ))
             )
             replaceGoal(updated)

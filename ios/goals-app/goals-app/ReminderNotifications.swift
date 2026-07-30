@@ -120,6 +120,9 @@ enum ReminderNotificationScheduler {
 
     static func cancel(source: String, sourceId: Int) async {
         await cancel(prefix: prefix(source: source, sourceId: sourceId))
+        if #available(iOS 26.0, *), source == "routine" {
+            ReminderAlarm.cancel(id: ReminderAlarmID.make(source: "routine", sourceId: sourceId))
+        }
     }
 
     static func cancel(source: String, sourceId: Int, scheduledFor: String) async {
@@ -142,6 +145,16 @@ enum ReminderNotificationScheduler {
         _ item: ScheduleItem,
         pending: [UNNotificationRequest]
     ) async {
+        // Important daily/weekly routines ring as a single recurring AlarmKit alarm
+        // (iOS 26+) instead of per-occurrence notifications.
+        if #available(iOS 26.0, *), item.source == "routine", item.important,
+           item.period == "daily" || item.period == "weekly" {
+            if !pending.isEmpty {
+                await cancel(source: item.source, sourceId: item.sourceId, scheduledFor: item.scheduledFor)
+            }
+            await scheduleRoutineAlarm(item)
+            return
+        }
         guard !item.completed,
               item.reminderTime != nil,
               item.scheduledFor >= Date().apiDate else {
@@ -333,6 +346,45 @@ enum ReminderNotificationScheduler {
             return (try? await center.requestAuthorization(options: [.alert, .badge, .sound])) == true
         default:
             return false
+        }
+    }
+
+    @available(iOS 26.0, *)
+    private static func scheduleRoutineAlarm(_ item: ScheduleItem) async {
+        guard !item.completed, let time = item.reminderTime else { return }
+        let parts = time.split(separator: ":")
+        guard parts.count >= 2, let hour = Int(parts[0]), let minute = Int(parts[1]) else { return }
+        let weekdays: [Locale.Weekday]
+        switch item.period {
+        case "daily":
+            weekdays = [.sunday, .monday, .tuesday, .wednesday, .thursday, .friday, .saturday]
+        case "weekly":
+            guard let day = weekday(fromAPIDate: item.scheduledFor) else { return }
+            weekdays = [day]
+        default:
+            return
+        }
+        await ReminderAlarm.scheduleWeekly(
+            id: ReminderAlarmID.make(source: "routine", sourceId: item.sourceId),
+            title: item.title, weekdays: weekdays, hour: hour, minute: minute
+        )
+    }
+
+    private static func weekday(fromAPIDate apiDate: String) -> Locale.Weekday? {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar.current
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        guard let date = formatter.date(from: apiDate) else { return nil }
+        switch Calendar.current.component(.weekday, from: date) {
+        case 1: return .sunday
+        case 2: return .monday
+        case 3: return .tuesday
+        case 4: return .wednesday
+        case 5: return .thursday
+        case 6: return .friday
+        case 7: return .saturday
+        default: return nil
         }
     }
 

@@ -1882,6 +1882,7 @@ struct RoutineScheduleEditor: View {
     @State private var reminderTime: Date
     @State private var repeatUntilCompleted: Bool
     @State private var nudgeIntervalMinutes: Int
+    @State private var important: Bool
     @State private var saving = false
 
     init(goal: Goal) {
@@ -1892,7 +1893,10 @@ struct RoutineScheduleEditor: View {
         _reminderTime = State(initialValue: Self.parseTime(goal.reminderTime))
         _repeatUntilCompleted = State(initialValue: goal.repeatUntilCompleted)
         _nudgeIntervalMinutes = State(initialValue: goal.nudgeIntervalMinutes ?? 60)
+        _important = State(initialValue: goal.important)
     }
+
+    private var supportsAlarm: Bool { goal.period == "daily" || goal.period == "weekly" }
 
     var body: some View {
         NavigationStack {
@@ -1917,13 +1921,28 @@ struct RoutineScheduleEditor: View {
                     Toggle("Add a time", isOn: $hasReminderTime)
                     if hasReminderTime {
                         DatePicker("Reminder", selection: $reminderTime, displayedComponents: .hourAndMinute)
-                        Toggle("Keep nudging until done", isOn: $repeatUntilCompleted)
-                        if repeatUntilCompleted {
-                            Picker("Nudge every", selection: $nudgeIntervalMinutes) {
-                                Text("30 minutes").tag(30)
-                                Text("1 hour").tag(60)
-                                Text("2 hours").tag(120)
-                                Text("4 hours").tag(240)
+                        if supportsAlarm {
+                            Toggle(isOn: $important) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Important")
+                                    Text("Rings like an alarm — breaks through silent & Focus")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            if important, #unavailable(iOS 26.0) {
+                                Text("On this iOS version, important routines use repeated alerts instead of a true alarm.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        if !important {
+                            Toggle("Keep nudging until done", isOn: $repeatUntilCompleted)
+                            if repeatUntilCompleted {
+                                Picker("Nudge every", selection: $nudgeIntervalMinutes) {
+                                    Text("30 minutes").tag(30)
+                                    Text("1 hour").tag(60)
+                                    Text("2 hours").tag(120)
+                                    Text("4 hours").tag(240)
+                                }
                             }
                         }
                     }
@@ -1943,8 +1962,9 @@ struct RoutineScheduleEditor: View {
                                 days: days,
                                 weekStartsOn: weekStartsOn,
                                 reminderTime: hasReminderTime ? reminderTime.apiTime : nil,
-                                repeatUntilCompleted: hasReminderTime && repeatUntilCompleted,
-                                nudgeIntervalMinutes: repeatUntilCompleted ? nudgeIntervalMinutes : nil
+                                repeatUntilCompleted: hasReminderTime && !important && repeatUntilCompleted,
+                                nudgeIntervalMinutes: !important && repeatUntilCompleted ? nudgeIntervalMinutes : nil,
+                                important: hasReminderTime && supportsAlarm && important
                             )
                             saving = false
                             dismiss()
