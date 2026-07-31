@@ -186,6 +186,8 @@ class Reminder(SQLModel, table=True):
     # Persistent reminders keep producing notification nudges until completed.
     repeat_until_completed: bool = False
     important: bool = Field(default=False)
+    # none | daily | weekly — recurring reminders re-ring on that cadence.
+    repeat_rule: str = Field(default="none")
     nudge_interval_minutes: Optional[int] = None
     completed_at: Optional[datetime] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)

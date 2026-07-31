@@ -42,6 +42,16 @@ def _clean_notes(value: str | None) -> str | None:
     return notes or None
 
 
+_REPEAT_RULES = {"none", "daily", "weekly"}
+
+
+def _clean_repeat_rule(value: str | None) -> str:
+    rule = (value or "none").strip().lower()
+    if rule not in _REPEAT_RULES:
+        raise ValueError("repeat_rule must be one of none, daily, weekly")
+    return rule
+
+
 def reminder_to_read(reminder: Reminder) -> dict:
     return {
         "id": reminder.id,
@@ -53,6 +63,7 @@ def reminder_to_read(reminder: Reminder) -> dict:
         "repeat_until_completed": reminder.repeat_until_completed,
         "nudge_interval_minutes": reminder.nudge_interval_minutes,
         "important": reminder.important,
+        "repeat_rule": reminder.repeat_rule,
         "created_at": reminder.created_at,
     }
 
@@ -88,6 +99,7 @@ def create_reminder(session: Session, data: dict) -> dict:
         repeat_until_completed=persistent,
         nudge_interval_minutes=interval,
         important=bool(data.get("important", False)),
+        repeat_rule=_clean_repeat_rule(data.get("repeat_rule")),
     )
     session.add(reminder)
     session.commit()
@@ -122,6 +134,8 @@ def update_reminder(session: Session, reminder_id: int, data: dict) -> dict | No
         reminder.nudge_interval_minutes = interval
     if "important" in data and data["important"] is not None:
         reminder.important = bool(data["important"])
+    if "repeat_rule" in data and data["repeat_rule"] is not None:
+        reminder.repeat_rule = _clean_repeat_rule(data["repeat_rule"])
     if "completed" in data:
         reminder.completed_at = datetime.utcnow() if data["completed"] else None
     session.add(reminder)
@@ -311,6 +325,7 @@ def list_schedule(session: Session, start: date, end: date) -> list[dict]:
             "repeat_until_completed": reminder.repeat_until_completed,
             "nudge_interval_minutes": reminder.nudge_interval_minutes,
             "important": reminder.important,
+            "repeat_rule": reminder.repeat_rule,
             "end_time": None, "location": None,
         })
 

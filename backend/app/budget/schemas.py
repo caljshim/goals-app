@@ -213,6 +213,7 @@ class ReminderCreate(BaseModel):
     repeat_until_completed: bool = False
     nudge_interval_minutes: Optional[int] = None
     important: bool = False
+    repeat_rule: str = "none"
 
 
 class ReminderUpdate(BaseModel):
@@ -224,6 +225,7 @@ class ReminderUpdate(BaseModel):
     repeat_until_completed: Optional[bool] = None
     nudge_interval_minutes: Optional[int] = None
     important: Optional[bool] = None
+    repeat_rule: Optional[str] = None
 
 
 class ReminderRead(BaseModel):
@@ -236,6 +238,7 @@ class ReminderRead(BaseModel):
     repeat_until_completed: bool = False
     nudge_interval_minutes: Optional[int] = None
     important: bool = False
+    repeat_rule: str = "none"
     created_at: datetime
 
 
@@ -282,6 +285,7 @@ class ScheduleItemRead(BaseModel):
     repeat_until_completed: bool = False
     nudge_interval_minutes: Optional[int] = None
     important: bool = False
+    repeat_rule: str = "none"
     end_time: Optional[str] = None
     location: Optional[str] = None
 

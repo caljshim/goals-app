@@ -48,6 +48,31 @@ def test_reminder_important_round_trips_through_api_and_schedule(client):
     assert cleared.status_code == 200 and cleared.json()["important"] is False
 
 
+def test_reminder_repeat_rule_round_trips(client):
+    scheduled = date.today() + timedelta(days=1)
+    created = client.post("/api/reminders", json={
+        "title": "Vitamins", "scheduled_for": scheduled.isoformat(),
+        "reminder_time": "08:00", "important": True, "repeat_rule": "daily",
+    })
+    assert created.status_code == 201
+    reminder = created.json()
+    assert reminder["repeat_rule"] == "daily"
+
+    item = client.get("/api/schedule", params={
+        "start": scheduled.isoformat(), "end": scheduled.isoformat(),
+    }).json()[0]
+    assert item["repeat_rule"] == "daily"
+
+    updated = client.patch(f"/api/reminders/{reminder['id']}", json={"repeat_rule": "weekly"})
+    assert updated.status_code == 200 and updated.json()["repeat_rule"] == "weekly"
+
+    bad = client.post("/api/reminders", json={
+        "title": "x", "scheduled_for": scheduled.isoformat(),
+        "reminder_time": "08:00", "repeat_rule": "hourly",
+    })
+    assert bad.status_code == 400
+
+
 def test_reminder_defaults_to_not_important(client):
     scheduled = date.today() + timedelta(days=1)
     created = client.post("/api/reminders", json={
@@ -217,6 +242,7 @@ def test_calendar_event_lifecycle_and_schedule_projection(client):
         "repeat_until_completed": False,
         "nudge_interval_minutes": None,
         "important": False,
+        "repeat_rule": "none",
         "end_time": "20:30",
         "location": "Little Star",
     }]

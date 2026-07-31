@@ -154,6 +154,7 @@ def ensure_schema(eng: Engine = engine) -> None:
                 "repeat_until_completed": "BOOLEAN DEFAULT FALSE",
                 "nudge_interval_minutes": "INTEGER",
                 "important": "BOOLEAN DEFAULT FALSE",
+                "repeat_rule": "VARCHAR DEFAULT 'none'",
             },
         )
 
