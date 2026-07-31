@@ -145,14 +145,14 @@ enum ReminderNotificationScheduler {
         _ item: ScheduleItem,
         pending: [UNNotificationRequest]
     ) async {
-        // Important daily/weekly routines ring as a single recurring AlarmKit alarm
-        // (iOS 26+) instead of per-occurrence notifications.
-        if #available(iOS 26.0, *), item.source == "routine", item.important,
-           item.period == "daily" || item.period == "weekly" {
+        // Important reminders/routines ring via AlarmKit (iOS 26+) instead of a
+        // notification, so they never fire twice. Only skip the notification when
+        // an alarm was actually scheduled (e.g. monthly routines have no AlarmKit
+        // recurrence and fall back to notifications).
+        if #available(iOS 26.0, *), item.important, await scheduleAlarm(for: item) {
             if !pending.isEmpty {
                 await cancel(source: item.source, sourceId: item.sourceId, scheduledFor: item.scheduledFor)
             }
-            await scheduleRoutineAlarm(item)
             return
         }
         guard !item.completed,
@@ -349,25 +349,41 @@ enum ReminderNotificationScheduler {
         }
     }
 
+    /// Schedules the AlarmKit alarm for an important schedule item. Returns whether
+    /// an alarm was scheduled (false ⇒ caller should keep the notification fallback).
     @available(iOS 26.0, *)
-    private static func scheduleRoutineAlarm(_ item: ScheduleItem) async {
-        guard !item.completed, let time = item.reminderTime else { return }
-        let parts = time.split(separator: ":")
-        guard parts.count >= 2, let hour = Int(parts[0]), let minute = Int(parts[1]) else { return }
-        let weekdays: [Locale.Weekday]
-        switch item.period {
-        case "daily":
-            weekdays = [.sunday, .monday, .tuesday, .wednesday, .thursday, .friday, .saturday]
-        case "weekly":
-            guard let day = weekday(fromAPIDate: item.scheduledFor) else { return }
-            weekdays = [day]
+    private static func scheduleAlarm(for item: ScheduleItem) async -> Bool {
+        guard !item.completed, let time = item.reminderTime else { return false }
+        switch item.source {
+        case "reminder":
+            guard let fireDate = dueDate(day: item.scheduledFor, time: time),
+                  fireDate > Date() else { return false }
+            await ReminderAlarm.scheduleOnce(
+                id: ReminderAlarmID.make(source: "reminder", sourceId: item.sourceId),
+                title: item.title, at: fireDate
+            )
+            return true
+        case "routine":
+            let parts = time.split(separator: ":")
+            guard parts.count >= 2, let hour = Int(parts[0]), let minute = Int(parts[1]) else { return false }
+            let weekdays: [Locale.Weekday]
+            switch item.period {
+            case "daily":
+                weekdays = [.sunday, .monday, .tuesday, .wednesday, .thursday, .friday, .saturday]
+            case "weekly":
+                guard let day = weekday(fromAPIDate: item.scheduledFor) else { return false }
+                weekdays = [day]
+            default:
+                return false
+            }
+            await ReminderAlarm.scheduleWeekly(
+                id: ReminderAlarmID.make(source: "routine", sourceId: item.sourceId),
+                title: item.title, weekdays: weekdays, hour: hour, minute: minute
+            )
+            return true
         default:
-            return
+            return false
         }
-        await ReminderAlarm.scheduleWeekly(
-            id: ReminderAlarmID.make(source: "routine", sourceId: item.sourceId),
-            title: item.title, weekdays: weekdays, hour: hour, minute: minute
-        )
     }
 
     private static func weekday(fromAPIDate apiDate: String) -> Locale.Weekday? {
@@ -545,13 +561,24 @@ enum ReminderAlarm {
         }
     }
 
+    /// Snooze length when the user taps the alarm's secondary button, matching
+    /// the system Clock's 9 minutes.
+    private static let snoozeDuration: TimeInterval = 9 * 60
+
     private static func attributes(title: String) -> AlarmAttributes<ReminderAlarmMetadata> {
         let stopButton = AlarmButton(
             text: "Stop", textColor: .white, systemImageName: "stop.fill"
         )
+        let snoozeButton = AlarmButton(
+            text: "Snooze", textColor: .white, systemImageName: "moon.zzz.fill"
+        )
+        // `.countdown` re-arms the alarm for `countdownDuration.postAlert` when the
+        // user taps Snooze.
         let alert = AlarmPresentation.Alert(
             title: LocalizedStringResource(stringLiteral: title),
-            stopButton: stopButton
+            stopButton: stopButton,
+            secondaryButton: snoozeButton,
+            secondaryButtonBehavior: .countdown
         )
         return AlarmAttributes(
             presentation: AlarmPresentation(alert: alert),
@@ -560,32 +587,31 @@ enum ReminderAlarm {
         )
     }
 
-    /// One-time alarm at a specific wall-clock date.
-    static func scheduleOnce(id: UUID, title: String, at date: Date) async {
+    private static func schedule(id: UUID, title: String, schedule: Alarm.Schedule) async {
         guard await requestAuthorization() else { return }
-        let config = AlarmManager.AlarmConfiguration.alarm(
-            schedule: .fixed(date),
+        let config = AlarmManager.AlarmConfiguration(
+            countdownDuration: Alarm.CountdownDuration(preAlert: nil, postAlert: snoozeDuration),
+            schedule: schedule,
             attributes: attributes(title: title),
             sound: .default
         )
         _ = try? await AlarmManager.shared.schedule(id: id, configuration: config)
     }
 
+    /// One-time alarm at a specific wall-clock date.
+    static func scheduleOnce(id: UUID, title: String, at date: Date) async {
+        await schedule(id: id, title: title, schedule: .fixed(date))
+    }
+
     /// Recurring alarm at a time of day on the given weekdays (daily == all seven).
     static func scheduleWeekly(
         id: UUID, title: String, weekdays: [Locale.Weekday], hour: Int, minute: Int
     ) async {
-        guard await requestAuthorization() else { return }
         let relative = Alarm.Schedule.Relative(
             time: .init(hour: hour, minute: minute),
             repeats: weekdays.isEmpty ? .never : .weekly(weekdays)
         )
-        let config = AlarmManager.AlarmConfiguration.alarm(
-            schedule: .relative(relative),
-            attributes: attributes(title: title),
-            sound: .default
-        )
-        _ = try? await AlarmManager.shared.schedule(id: id, configuration: config)
+        await schedule(id: id, title: title, schedule: .relative(relative))
     }
 
     static func cancel(id: UUID) {
