@@ -64,6 +64,84 @@ private struct ScheduleDaySelection: Identifiable {
     var id: String { date.apiDate }
 }
 
+enum ScheduleSwipeReveal {
+    static let actionWidth: CGFloat = 84
+
+    static func settledOffset(
+        current: CGFloat,
+        translation: CGSize
+    ) -> CGFloat {
+        guard abs(translation.width) > abs(translation.height) else {
+            return current
+        }
+        let proposed = current + translation.width
+        return proposed < -(actionWidth / 2) ? -actionWidth : 0
+    }
+}
+
+private struct SwipeToEndRoutineRow<Content: View>: View {
+    let onEnd: () -> Void
+    @ViewBuilder let content: () -> Content
+    @State private var restingOffset: CGFloat = 0
+    @GestureState private var dragOffset: CGFloat = 0
+
+    private var visibleOffset: CGFloat {
+        max(
+            -ScheduleSwipeReveal.actionWidth,
+            min(0, restingOffset + dragOffset)
+        )
+    }
+
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            Button(role: .destructive) {
+                withAnimation(.snappy) { restingOffset = 0 }
+                onEnd()
+            } label: {
+                VStack(spacing: 3) {
+                    Image(systemName: "trash")
+                    Text("End")
+                        .font(.caption2.weight(.semibold))
+                }
+                .foregroundStyle(.white)
+                .frame(width: ScheduleSwipeReveal.actionWidth)
+                .frame(maxHeight: .infinity)
+                .background(Theme.negative)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("End routine")
+
+            content()
+                .background(Theme.card)
+                .offset(x: visibleOffset)
+                .simultaneousGesture(swipeGesture)
+        }
+        .clipped()
+        .accessibilityAction(named: "End routine") {
+            onEnd()
+        }
+    }
+
+    private var swipeGesture: some Gesture {
+        DragGesture(minimumDistance: 12)
+            .updating($dragOffset) { value, state, _ in
+                guard abs(value.translation.width) > abs(value.translation.height) else {
+                    return
+                }
+                state = value.translation.width
+            }
+            .onEnded { value in
+                let target = ScheduleSwipeReveal.settledOffset(
+                    current: restingOffset,
+                    translation: value.translation
+                )
+                withAnimation(.snappy) {
+                    restingOffset = target
+                }
+            }
+    }
+}
+
 struct ScheduleView: View {
     @EnvironmentObject private var store: MoneyStore
     @State private var selectedDate = Date()
@@ -282,85 +360,132 @@ struct ScheduleAgendaWidget: View {
     }
 
     @ViewBuilder private func interactiveRow(_ item: ScheduleItem) -> some View {
-        if item.source == "reminder" || item.source == "event" || item.source == "routine" {
-            agendaRow(item)
-                .pressAndHoldToEdit {
-                    if item.source == "routine" {
-                        editingGoal = GoalEditorSelection(id: item.sourceId)
-                    } else {
-                        editingItem = item
-                    }
-                }
+        if item.source == "routine" {
+            SwipeToEndRoutineRow {
+                Task { await store.endGoal(item.sourceId) }
+            } content: {
+                editableAgendaRow(item)
+            }
+        } else if item.source == "reminder" || item.source == "event" {
+            editableAgendaRow(item)
         } else {
             agendaRow(item)
         }
     }
 
+    private func editableAgendaRow(_ item: ScheduleItem) -> some View {
+        agendaRow(item)
+            .pressAndHoldToEdit {
+                if item.source == "routine" {
+                    editingGoal = GoalEditorSelection(id: item.sourceId)
+                } else {
+                    editingItem = item
+                }
+            }
+    }
+
     private func agendaRow(_ item: ScheduleItem) -> some View {
-        HStack(spacing: 11) {
+        HStack(spacing: 8) {
             Button {
-                Task { await store.toggleScheduleItem(item) }
+                performPrimaryAction(for: item)
             } label: {
+                HStack(spacing: 11) {
                 Image(systemName: symbol(for: item))
                     .font(.title3)
                     .foregroundStyle(color(for: item))
                     .frame(width: 24)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item.title)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.primary)
+                            .strikethrough(item.completed)
+                        if item.source != "reminder" {
+                            HStack(spacing: 5) {
+                                Text(sourceLabel(item))
+                                if let notes = item.notes, item.source == "event" {
+                                    Text("· \(notes)").lineLimit(1)
+                                }
+                            }
+                            .font(.caption)
+                            .foregroundStyle(
+                                item.missed ? Theme.negative : Color.secondary
+                            )
+                        }
+                    }
+                    Spacer()
+                    if let time = item.reminderTime {
+                        Text(timeLabel(item, start: time))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(
-                item.source == "event"
-                    || item.source == "goal_deadline"
-                    || item.scheduledFor > Date().apiDate
+                (item.source == "reminder" || item.source == "routine")
+                && item.scheduledFor > Date().apiDate
             )
+            .accessibilityHint(primaryActionHint(for: item))
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(item.title)
-                    .font(.subheadline.weight(.medium)).foregroundStyle(.primary)
-                    .strikethrough(item.completed)
-                if item.source != "reminder" {
-                    HStack(spacing: 5) {
-                        Text(sourceLabel(item))
-                        if let notes = item.notes, item.source == "event" {
-                            Text("· \(notes)").lineLimit(1)
-                        }
-                    }
-                    .font(.caption).foregroundStyle(item.missed ? Theme.negative : Color.secondary)
-                }
-            }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 5) {
-                if let time = item.reminderTime {
-                    Text(timeLabel(item, start: time))
-                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                }
-                if (item.source == "reminder" || item.source == "routine"),
-                   item.repeatUntilCompleted, !item.completed {
+            if (item.source == "reminder" || item.source == "routine"),
+               item.repeatUntilCompleted, !item.completed {
+                Menu {
                     Menu {
-                        Menu {
-                            ForEach([15, 30, 60, 120, 240], id: \.self) { minutes in
-                                Button(snoozeLabel(minutes)) {
-                                    Task { await store.snoozeReminder(item, minutes: minutes) }
-                                }
+                        ForEach([15, 30, 60, 120, 240], id: \.self) { minutes in
+                            Button(snoozeLabel(minutes)) {
+                                Task { await store.snoozeReminder(item, minutes: minutes) }
                             }
-                        } label: {
-                            Label("Snooze", systemImage: "clock.arrow.circlepath")
-                        }
-                        Button(role: item.source == "reminder" ? .destructive : nil) {
-                            Task { await store.toggleScheduleItem(item) }
-                        } label: {
-                            Label(
-                                item.source == "reminder" ? "Stop reminders" : "Mark done",
-                                systemImage: item.source == "reminder" ? "bell.slash" : "checkmark"
-                            )
                         }
                     } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .font(.title3)
-                            .foregroundStyle(Theme.brand)
+                        Label("Snooze", systemImage: "clock.arrow.circlepath")
                     }
-                    .accessibilityLabel("Persistent notification options")
+                    Button(role: item.source == "reminder" ? .destructive : nil) {
+                        Task { await store.toggleScheduleItem(item) }
+                    } label: {
+                        Label(
+                            item.source == "reminder" ? "Stop reminders" : "Mark done",
+                            systemImage: item.source == "reminder"
+                                ? "bell.slash"
+                                : "checkmark"
+                        )
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.title3)
+                        .foregroundStyle(Theme.brand)
                 }
+                .accessibilityLabel("Persistent notification options")
             }
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func performPrimaryAction(for item: ScheduleItem) {
+        switch item.source {
+        case "routine", "reminder":
+            Task { await store.toggleScheduleItem(item) }
+        case "event":
+            editingItem = item
+        case "goal_deadline":
+            editingGoal = GoalEditorSelection(id: item.sourceId)
+        default:
+            break
+        }
+    }
+
+    private func primaryActionHint(for item: ScheduleItem) -> String {
+        switch item.source {
+        case "routine", "reminder":
+            return item.completed ? "Marks this item incomplete" : "Marks this item complete"
+        case "event":
+            return "Opens this event"
+        case "goal_deadline":
+            return "Opens this goal"
+        default:
+            return ""
         }
     }
 

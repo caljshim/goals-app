@@ -3971,19 +3971,15 @@ private struct CopilotTopOffsetKey: PreferenceKey {
 struct CopilotView: View {
     @EnvironmentObject private var store: MoneyStore
     var initialShortcut: AgentShortcutInvocation? = nil
-    @State private var input = ""
     @State private var editingMessageId: UUID?
     @State private var scrollRequest = 0
     @State private var visibleMessageCount = 5
     @State private var didInitialScroll = false
     @State private var loadingEarlierMessages = false
-    @State private var selectedPhotoItems: [PhotosPickerItem] = []
-    @State private var pendingAttachments: [MediaAsset] = []
-    @State private var uploadingImages = false
     @State private var topTriggerOffset = -CGFloat.greatestFiniteMagnitude
     @State private var historyLoadArmed = false
     @State private var handledHistoryLoadForDrag = false
-    @FocusState private var inputFocused: Bool
+    @State private var scrollTask: Task<Void, Never>?
 
     private var sending: Bool { store.copilotRequestInFlight }
     private var visibleMessages: ArraySlice<ChatMessage> {
@@ -3991,6 +3987,10 @@ struct CopilotView: View {
     }
     private var hasEarlierMessages: Bool {
         store.messages.count > visibleMessageCount
+    }
+    private var editingMessage: ChatMessage? {
+        guard let editingMessageId else { return nil }
+        return store.messages.first { $0.id == editingMessageId }
     }
 
     let starters = [
@@ -4003,7 +4003,12 @@ struct CopilotView: View {
     var body: some View {
         conversation
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            composer
+            CopilotComposer(
+                sending: sending,
+                editingMessage: editingMessage,
+                onSubmit: submit,
+                onCancel: cancelEditing
+            )
         }
         .background(Theme.canvas)
         .task(id: initialShortcut?.id) {
@@ -4035,7 +4040,13 @@ struct CopilotView: View {
                 .padding()
             }
             .coordinateSpace(name: "copilot-conversation")
-            .scrollDismissesKeyboard(.interactively)
+            .contentShape(Rectangle())
+            .scrollDismissesKeyboard(.immediately)
+            .simultaneousGesture(
+                TapGesture().onEnded {
+                    dismissKeyboard()
+                }
+            )
             .onPreferenceChange(CopilotTopOffsetKey.self) { offset in
                 topTriggerOffset = offset
                 guard didInitialScroll, historyLoadArmed, offset >= -72 else { return }
@@ -4068,18 +4079,12 @@ struct CopilotView: View {
             .onChange(of: sending) { value in
                 if value { scrollToConversationBottom(proxy) }
             }
-            .onChange(of: inputFocused) { focused in
-                if focused { scrollToConversationBottom(proxy) }
-            }
-            .onReceive(
-                NotificationCenter.default.publisher(
-                    for: UIResponder.keyboardWillChangeFrameNotification
-                )
-            ) { _ in
-                scrollToConversationBottom(proxy)
-            }
             .onAppear {
                 prepareInitialConversation(using: proxy)
+            }
+            .onDisappear {
+                scrollTask?.cancel()
+                scrollTask = nil
             }
         }
     }
@@ -4120,7 +4125,7 @@ struct CopilotView: View {
             .padding(.top, 24)
 
             ForEach(starters, id: \.self) { starter in
-                Button(starter) { submit(starter) }
+                Button(starter) { submit(starter, []) }
                     .buttonStyle(.bordered)
                     .font(.subheadline)
                     .disabled(sending)
@@ -4145,156 +4150,26 @@ struct CopilotView: View {
         .id("thinking")
     }
 
-    private var composer: some View {
-        VStack(spacing: 8) {
-            if !pendingAttachments.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(pendingAttachments) { asset in
-                            HStack(spacing: 5) {
-                                Image(systemName: "photo")
-                                Text(asset.filename)
-                                    .lineLimit(1)
-                                Button {
-                                    pendingAttachments.removeAll {
-                                        $0.id == asset.id
-                                    }
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(
-                                    "Remove \(asset.filename)"
-                                )
-                            }
-                            .font(.caption)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 6)
-                            .background(Theme.card)
-                            .clipShape(Capsule())
-                        }
-                    }
-                }
-            }
-            if editingMessageId != nil {
-                HStack {
-                    Label("Editing prompt", systemImage: "pencil")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Cancel", action: cancelEditing)
-                        .font(.caption.weight(.medium))
-                }
-            }
-            HStack {
-                PhotosPicker(
-                    selection: $selectedPhotoItems,
-                    maxSelectionCount: max(
-                        1,
-                        4 - pendingAttachments.count
-                    ),
-                    matching: .images
-                ) {
-                    if uploadingImages {
-                        ProgressView()
-                    } else {
-                        Image(systemName: "photo.badge.plus")
-                            .font(.title3)
-                    }
-                }
-                .disabled(
-                    sending
-                    || uploadingImages
-                    || editingMessageId != nil
-                    || pendingAttachments.count >= 4
-                )
-                .accessibilityLabel("Attach photos")
-                .onChange(of: selectedPhotoItems) { items in
-                    guard !items.isEmpty else { return }
-                    Task { await uploadSelectedImages(items) }
-                }
-                TextField("Ask anything", text: $input, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($inputFocused)
-                    .onSubmit { submit(input) }
-                Button { submit(input) } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.title)
-                        .foregroundStyle(Theme.brand)
-                        .accessibilityLabel(editingMessageId == nil ? "Send" : "Save and resend")
-                }
-                .disabled(
-                    (
-                        input.trimmingCharacters(
-                            in: .whitespacesAndNewlines
-                        ).isEmpty
-                        && pendingAttachments.isEmpty
-                    )
-                    || sending
-                    || uploadingImages
-                )
-            }
-        }
-        .padding()
-        .background(.bar)
-    }
-
     private func beginEditing(_ message: ChatMessage) {
         guard !sending else { return }
-        pendingAttachments = []
         editingMessageId = message.id
-        input = message.content
-        inputFocused = true
     }
 
     private func cancelEditing() {
         editingMessageId = nil
-        input = ""
-        inputFocused = false
     }
 
-    private func submit(_ text: String) {
+    private func submit(_ text: String, _ attachmentIds: [String]) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (!clean.isEmpty || !pendingAttachments.isEmpty),
-              !sending,
-              !uploadingImages else { return }
+        guard (!clean.isEmpty || !attachmentIds.isEmpty), !sending else { return }
         let messageId = editingMessageId
-        let attachmentIds = pendingAttachments.map(\.id)
-        input = ""
         editingMessageId = nil
-        pendingAttachments = []
         scrollRequest &+= 1
         Task {
             if let messageId {
                 await store.regenerate(from: messageId, replacement: clean)
             } else {
                 await store.send(clean, attachmentIds: attachmentIds)
-            }
-        }
-    }
-
-    @MainActor
-    private func uploadSelectedImages(_ items: [PhotosPickerItem]) async {
-        uploadingImages = true
-        selectedPhotoItems = []
-        defer { uploadingImages = false }
-        for item in items.prefix(max(0, 4 - pendingAttachments.count)) {
-            do {
-                guard let source = try await item.loadTransferable(
-                    type: Data.self
-                ),
-                let image = UIImage(data: source),
-                let jpeg = image.jpegData(compressionQuality: 0.9) else {
-                    throw APIError.server("That photo could not be decoded.")
-                }
-                let asset = try await store.uploadImage(
-                    jpeg,
-                    filename: "audel-photo-\(UUID().uuidString).jpg"
-                )
-                pendingAttachments.append(asset)
-            } catch {
-                store.error = error.localizedDescription
-                return
             }
         }
     }
@@ -4339,16 +4214,194 @@ struct CopilotView: View {
     }
 
     private func scrollToConversationBottom(_ proxy: ScrollViewProxy) {
-        // SwiftUI can publish the message before its LazyVStack has finished
-        // laying it out. Scroll after that layout pass, then settle once more
-        // after the keyboard/Thinking row animation changes the viewport.
-        Task { @MainActor in
+        scrollTask?.cancel()
+        scrollTask = Task { @MainActor in
             await Task<Never, Never>.yield()
+            guard !Task.isCancelled else { return }
             withAnimation(.easeOut(duration: 0.2)) {
                 proxy.scrollTo("copilot-conversation-bottom", anchor: .bottom)
             }
-            try? await Task<Never, Never>.sleep(nanoseconds: 350_000_000)
+            do {
+                try await Task<Never, Never>.sleep(nanoseconds: 250_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
             proxy.scrollTo("copilot-conversation-bottom", anchor: .bottom)
+        }
+    }
+
+    private func dismissKeyboard() {
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
+        )
+    }
+}
+
+private struct CopilotComposer: View {
+    @EnvironmentObject private var store: MoneyStore
+    let sending: Bool
+    let editingMessage: ChatMessage?
+    let onSubmit: (String, [String]) -> Void
+    let onCancel: () -> Void
+
+    @State private var input = ""
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
+    @State private var pendingAttachments: [MediaAsset] = []
+    @State private var uploadingImages = false
+    @FocusState private var inputFocused: Bool
+
+    private var cleanInput: String {
+        input.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            attachments
+            editingBanner
+            HStack {
+                photoPicker
+                TextField("Ask anything", text: $input, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($inputFocused)
+                    .submitLabel(.send)
+                    .onSubmit(submit)
+                Button(action: submit) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.title)
+                        .foregroundStyle(Theme.brand)
+                        .accessibilityLabel(
+                            editingMessage == nil ? "Send" : "Save and resend"
+                        )
+                }
+                .disabled(
+                    (cleanInput.isEmpty && pendingAttachments.isEmpty)
+                    || sending
+                    || uploadingImages
+                )
+            }
+        }
+        .padding()
+        .background(.bar)
+        .onChange(of: editingMessage?.id) { _ in
+            guard let editingMessage else { return }
+            pendingAttachments = []
+            input = editingMessage.content
+            inputFocused = true
+        }
+    }
+
+    @ViewBuilder private var attachments: some View {
+        if !pendingAttachments.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(pendingAttachments) { asset in
+                        HStack(spacing: 5) {
+                            Image(systemName: "photo")
+                            Text(asset.filename)
+                                .lineLimit(1)
+                            Button {
+                                pendingAttachments.removeAll {
+                                    $0.id == asset.id
+                                }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Remove \(asset.filename)")
+                        }
+                        .font(.caption)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .background(Theme.card)
+                        .clipShape(Capsule())
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var editingBanner: some View {
+        if editingMessage != nil {
+            HStack {
+                Label("Editing prompt", systemImage: "pencil")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel", action: cancelEditing)
+                    .font(.caption.weight(.medium))
+            }
+        }
+    }
+
+    private var photoPicker: some View {
+        PhotosPicker(
+            selection: $selectedPhotoItems,
+            maxSelectionCount: max(1, 4 - pendingAttachments.count),
+            matching: .images
+        ) {
+            if uploadingImages {
+                ProgressView()
+            } else {
+                Image(systemName: "photo.badge.plus")
+                    .font(.title3)
+            }
+        }
+        .disabled(
+            sending
+            || uploadingImages
+            || editingMessage != nil
+            || pendingAttachments.count >= 4
+        )
+        .accessibilityLabel("Attach photos")
+        .onChange(of: selectedPhotoItems) { items in
+            guard !items.isEmpty else { return }
+            Task { await uploadSelectedImages(items) }
+        }
+    }
+
+    private func submit() {
+        guard (!cleanInput.isEmpty || !pendingAttachments.isEmpty),
+              !sending,
+              !uploadingImages else { return }
+        let attachmentIDs = pendingAttachments.map(\.id)
+        let submittedText = cleanInput
+        input = ""
+        pendingAttachments = []
+        onSubmit(submittedText, attachmentIDs)
+    }
+
+    private func cancelEditing() {
+        input = ""
+        pendingAttachments = []
+        inputFocused = false
+        onCancel()
+    }
+
+    @MainActor
+    private func uploadSelectedImages(_ items: [PhotosPickerItem]) async {
+        uploadingImages = true
+        selectedPhotoItems = []
+        defer { uploadingImages = false }
+        for item in items.prefix(max(0, 4 - pendingAttachments.count)) {
+            do {
+                guard let source = try await item.loadTransferable(type: Data.self),
+                      let image = UIImage(data: source),
+                      let jpeg = image.jpegData(compressionQuality: 0.9) else {
+                    throw APIError.server("That photo could not be decoded.")
+                }
+                let asset = try await store.uploadImage(
+                    jpeg,
+                    filename: "audel-photo-\(UUID().uuidString).jpg"
+                )
+                pendingAttachments.append(asset)
+            } catch {
+                store.error = error.localizedDescription
+                return
+            }
         }
     }
 }

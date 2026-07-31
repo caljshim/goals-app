@@ -186,6 +186,26 @@ final class goals_appTests: XCTestCase {
         XCTAssertEqual(store.baseURL, URL(string: "https://example.com/api"))
     }
 
+    func testRoutineSwipeRevealsEndActionAfterHorizontalThreshold() {
+        XCTAssertEqual(
+            ScheduleSwipeReveal.settledOffset(
+                current: 0,
+                translation: CGSize(width: -60, height: 4)
+            ),
+            -ScheduleSwipeReveal.actionWidth
+        )
+    }
+
+    func testRoutineSwipeIgnoresVerticalScrolling() {
+        XCTAssertEqual(
+            ScheduleSwipeReveal.settledOffset(
+                current: 0,
+                translation: CGSize(width: -30, height: 90)
+            ),
+            0
+        )
+    }
+
     private func widgetTask(
         id: String,
         source: String = "routine",
