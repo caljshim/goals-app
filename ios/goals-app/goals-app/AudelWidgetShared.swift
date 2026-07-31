@@ -9,8 +9,8 @@ enum AudelWidgetConstants {
     static let keychainAccount = "backend-bearer-token"
     static let todayWidgetKind = "AudelTodayWidget"
     static let selectedTabKey = "money.ui.selectedTab"
-    static let snapshotKey = "audel.widgets.today.snapshot"
-    static let baseURLKey = "audel.widgets.api-base-url"
+    static let snapshotFilename = "audel-widget-today.json"
+    static let configurationFilename = "audel-widget-configuration.json"
 }
 
 struct AudelWidgetTask: Codable, Hashable, Identifiable, Sendable {
@@ -119,24 +119,88 @@ struct AudelTodayConfigurationIntent: WidgetConfigurationIntent {
     var filter: AudelWidgetTaskFilter
 }
 
-enum AudelWidgetStore {
-    private static var defaults: UserDefaults {
-        UserDefaults(suiteName: AudelWidgetConstants.appGroupIdentifier) ?? .standard
+struct AudelWidgetFileStore {
+    private struct Configuration: Codable {
+        let baseURL: String
     }
 
-    static func load() -> AudelWidgetSnapshot {
-        guard let data = defaults.data(forKey: AudelWidgetConstants.snapshotKey),
+    let directoryURL: URL
+
+    private var snapshotURL: URL {
+        directoryURL.appendingPathComponent(
+            AudelWidgetConstants.snapshotFilename,
+            isDirectory: false
+        )
+    }
+
+    private var configurationURL: URL {
+        directoryURL.appendingPathComponent(
+            AudelWidgetConstants.configurationFilename,
+            isDirectory: false
+        )
+    }
+
+    func loadSnapshot() -> AudelWidgetSnapshot {
+        guard let data = try? Data(contentsOf: snapshotURL),
               let snapshot = try? JSONDecoder().decode(AudelWidgetSnapshot.self, from: data) else {
             return .empty
         }
         return snapshot
     }
 
-    static func save(_ snapshot: AudelWidgetSnapshot, reloadTimelines: Bool = true) {
+    func saveSnapshot(_ snapshot: AudelWidgetSnapshot) {
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
-        defaults.set(data, forKey: AudelWidgetConstants.snapshotKey)
+        try? data.write(to: snapshotURL, options: .atomic)
+    }
+
+    func setBaseURL(_ value: String) {
+        guard let data = try? JSONEncoder().encode(Configuration(baseURL: value)) else {
+            return
+        }
+        try? data.write(to: configurationURL, options: .atomic)
+    }
+
+    var baseURL: URL? {
+        guard let data = try? Data(contentsOf: configurationURL),
+              let configuration = try? JSONDecoder().decode(Configuration.self, from: data) else {
+            return nil
+        }
+        return URL(string: configuration.baseURL)
+    }
+}
+
+enum AudelWidgetStore {
+    private static let fileStore: AudelWidgetFileStore? = {
+        guard let directoryURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: AudelWidgetConstants.appGroupIdentifier
+        ) else {
+            return nil
+        }
+        return AudelWidgetFileStore(directoryURL: directoryURL)
+    }()
+
+    private static let writeQueue = DispatchQueue(
+        label: "com.audel.widget-store",
+        qos: .utility
+    )
+
+    static func load() -> AudelWidgetSnapshot {
+        fileStore?.loadSnapshot() ?? .empty
+    }
+
+    static func save(_ snapshot: AudelWidgetSnapshot, reloadTimelines: Bool = true) {
+        fileStore?.saveSnapshot(snapshot)
         if reloadTimelines {
             WidgetCenter.shared.reloadTimelines(ofKind: AudelWidgetConstants.todayWidgetKind)
+        }
+    }
+
+    static func saveInBackground(
+        _ snapshot: AudelWidgetSnapshot,
+        reloadTimelines: Bool = true
+    ) {
+        writeQueue.async {
+            save(snapshot, reloadTimelines: reloadTimelines)
         }
     }
 
@@ -151,28 +215,36 @@ enum AudelWidgetStore {
     }
 
     static func setBaseURL(_ value: String) {
-        defaults.set(value, forKey: AudelWidgetConstants.baseURLKey)
+        fileStore?.setBaseURL(value)
     }
 
     static var baseURL: URL? {
-        guard let value = defaults.string(forKey: AudelWidgetConstants.baseURLKey) else {
-            return nil
-        }
-        return URL(string: value)
+        fileStore?.baseURL
     }
 }
 
 enum AudelWidgetRuntime {
+    private static let bootstrapQueue = DispatchQueue(
+        label: "com.audel.widget-bootstrap",
+        qos: .utility
+    )
+
     /// Copies Xcode's development configuration into stores shared with the
     /// extension. The backend credential remains in a shared Keychain access
     /// group; it is never written into widget preferences or timeline data.
     static func bootstrapFromEnvironment() {
         let environment = ProcessInfo.processInfo.environment
-        if let value = normalizedBaseURL(environment["API_BASE_URL"]) {
-            AudelWidgetStore.setBaseURL(value.absoluteString)
-        }
-        if let apiKey = clean(environment["APP_API_KEY"]) {
-            AudelWidgetCredentialStore.save(apiKey)
+        let baseURL = normalizedBaseURL(environment["API_BASE_URL"])
+        let apiKey = clean(environment["APP_API_KEY"])
+        guard baseURL != nil || apiKey != nil else { return }
+
+        bootstrapQueue.async {
+            if let baseURL {
+                AudelWidgetStore.setBaseURL(baseURL.absoluteString)
+            }
+            if let apiKey {
+                AudelWidgetCredentialStore.save(apiKey)
+            }
         }
     }
 

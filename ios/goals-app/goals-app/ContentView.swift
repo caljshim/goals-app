@@ -833,7 +833,7 @@ struct CategorizeUnbudgetedJobBody: Encodable {
                     missed: $0.missed
                 )
             }
-        AudelWidgetStore.save(
+        AudelWidgetStore.saveInBackground(
             AudelWidgetSnapshot(generatedAt: Date(), tasks: tasks)
         )
     }

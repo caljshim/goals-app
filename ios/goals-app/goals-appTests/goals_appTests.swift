@@ -164,6 +164,28 @@ final class goals_appTests: XCTestCase {
         XCTAssertNil(AudelDeepLink.tab(for: URL(string: "https://example.com")!))
     }
 
+    func testWidgetFileStorePersistsSnapshotAndConfigurationWithoutPreferences() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = AudelWidgetFileStore(directoryURL: directory)
+        let snapshot = AudelWidgetSnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_775_000_000),
+            tasks: [widgetTask(id: "persisted", title: "Persist me")]
+        )
+
+        store.saveSnapshot(snapshot)
+        store.setBaseURL("https://example.com/api")
+
+        XCTAssertEqual(store.loadSnapshot(), snapshot)
+        XCTAssertEqual(store.baseURL, URL(string: "https://example.com/api"))
+    }
+
     private func widgetTask(
         id: String,
         source: String = "routine",
