@@ -21,18 +21,6 @@ enum ReminderNotificationScheduler {
             title: "Done",
             options: []
         )
-        let reminderCategory = UNNotificationCategory(
-            identifier: reminderCategoryIdentifier,
-            actions: [complete],
-            intentIdentifiers: [],
-            options: []
-        )
-        let routineCategory = UNNotificationCategory(
-            identifier: routineCategoryIdentifier,
-            actions: [complete],
-            intentIdentifiers: [],
-            options: []
-        )
         let snooze = UNNotificationAction(
             identifier: snoozeActionIdentifier,
             title: "Snooze",
@@ -42,6 +30,20 @@ enum ReminderNotificationScheduler {
             identifier: stopActionIdentifier,
             title: "Stop",
             options: [.destructive]
+        )
+        // Every reminder/routine can be snoozed, mirroring the important-alarm
+        // Snooze button; importance only decides notification vs. alarm.
+        let reminderCategory = UNNotificationCategory(
+            identifier: reminderCategoryIdentifier,
+            actions: [snooze, complete],
+            intentIdentifiers: [],
+            options: []
+        )
+        let routineCategory = UNNotificationCategory(
+            identifier: routineCategoryIdentifier,
+            actions: [snooze, complete],
+            intentIdentifiers: [],
+            options: []
         )
         let persistentReminderCategory = UNNotificationCategory(
             identifier: persistentReminderCategoryIdentifier,
@@ -202,6 +204,28 @@ enum ReminderNotificationScheduler {
             persistent: true,
             intervalMinutes: interval,
             firstFireDate: Date().addingTimeInterval(TimeInterval(delay * 60))
+        )
+    }
+
+    /// Minutes a snooze delays the next alert, matching the AlarmKit alarm's snooze.
+    static let snoozeMinutes = 9
+
+    /// Uniform notification snooze for a reminder or routine: cancel the current
+    /// alert and re-fire once in `snoozeMinutes`. Important items snooze via the
+    /// AlarmKit alarm's Snooze button instead, so this covers the notification path.
+    static func snoozeNotification(source: String, sourceId: Int, scheduledFor: String, title: String) async {
+        await cancel(source: source, sourceId: sourceId, scheduledFor: scheduledFor)
+        let fireDate = Date().addingTimeInterval(TimeInterval(snoozeMinutes * 60))
+        await enqueue(
+            source: source,
+            sourceId: sourceId,
+            title: title,
+            notes: nil,
+            scheduledFor: scheduledFor,
+            reminderTime: fireDate.apiTime,
+            persistent: false,
+            intervalMinutes: nil,
+            firstFireDate: fireDate
         )
     }
 
@@ -453,61 +477,30 @@ final class ReminderNotificationDelegate: NSObject, UIApplicationDelegate, UNUse
             return
         }
         do {
-            if source == "routine" {
-                if action == ReminderNotificationScheduler.snoozeActionIdentifier {
-                    let interval = max(
-                        response.notification.request.content.userInfo["nudge_interval_minutes"] as? Int ?? 60,
-                        30
-                    )
-                    let item = ScheduleItem(
-                        id: "routine:\(sourceId):\(scheduledFor)",
-                        source: source,
-                        sourceId: sourceId,
-                        title: response.notification.request.content.title,
-                        scheduledFor: scheduledFor,
-                        reminderTime: Date().apiTime,
-                        completed: false,
-                        missed: scheduledFor < Date().apiDate,
-                        notes: nil,
-                        period: "routine",
-                        repeatUntilCompleted: true,
-                        nudgeIntervalMinutes: interval,
-                        important: false,
-                        endTime: nil,
-                        location: nil
-                    )
-                    await ReminderNotificationScheduler.snooze(item)
-                } else {
-                    let _: GoalTask = try await APIClient.shared.request(
-                        "goals/\(sourceId)/checkin",
-                        method: "PATCH",
-                        body: .init(CheckinBody(
-                            scheduledFor: scheduledFor,
-                            completed: true,
-                            allowOverdue: scheduledFor < Date().apiDate
-                        ))
-                    )
-                    await ReminderNotificationScheduler.cancel(
-                        source: source,
-                        sourceId: sourceId,
-                        scheduledFor: scheduledFor
-                    )
-                }
-            } else if action == ReminderNotificationScheduler.snoozeActionIdentifier {
-                let interval = max(
-                    response.notification.request.content.userInfo["nudge_interval_minutes"] as? Int ?? 60,
-                    30
+            if action == ReminderNotificationScheduler.snoozeActionIdentifier {
+                // Uniform snooze for reminders and routines (important items snooze
+                // via the alarm's own Snooze button instead of a notification).
+                await ReminderNotificationScheduler.snoozeNotification(
+                    source: source,
+                    sourceId: sourceId,
+                    scheduledFor: scheduledFor,
+                    title: response.notification.request.content.title
                 )
-                let next = Date().addingTimeInterval(TimeInterval(interval * 60))
-                let reminder: Reminder = try await APIClient.shared.request(
-                    "reminders/\(sourceId)",
+            } else if source == "routine" {
+                let _: GoalTask = try await APIClient.shared.request(
+                    "goals/\(sourceId)/checkin",
                     method: "PATCH",
-                    body: .init(ReminderSnoozeBody(
-                        scheduledFor: next.apiDate,
-                        reminderTime: next.apiTime
+                    body: .init(CheckinBody(
+                        scheduledFor: scheduledFor,
+                        completed: true,
+                        allowOverdue: scheduledFor < Date().apiDate
                     ))
                 )
-                await ReminderNotificationScheduler.schedule(reminder, requestAuthorization: false)
+                await ReminderNotificationScheduler.cancel(
+                    source: source,
+                    sourceId: sourceId,
+                    scheduledFor: scheduledFor
+                )
             } else {
                 let _: Reminder = try await APIClient.shared.request(
                     "reminders/\(sourceId)",
