@@ -2638,20 +2638,6 @@ struct FinancesView: View {
             }
             .buttonStyle(.plain)
         }
-        Button {
-            Task { await store.refreshFinances() }
-        } label: {
-            if store.financeRefreshInFlight {
-                ProgressView()
-                    .controlSize(.small)
-                    .accessibilityLabel("Refreshing finances")
-            } else {
-                Image(systemName: "arrow.clockwise")
-                    .accessibilityLabel("Refresh finances")
-            }
-        }
-        .buttonStyle(.plain)
-        .disabled(store.financeRefreshInFlight)
         NavigationLink {
             AccountsView()
                 .navigationTitle("Accounts")
@@ -3288,7 +3274,7 @@ struct TransactionsView: View {
                 }
             }
             .padding(.horizontal)
-            .padding(.bottom, pendingPeerPayments.isEmpty ? 0 : 4)
+            .padding(.bottom, 8)
             List {
                 ForEach(visible) { transaction in
                     TransactionRow(
@@ -4006,10 +3992,7 @@ struct CopilotView: View {
     ]
 
     var body: some View {
-        VStack(spacing: 0) {
-            newChatButton
-            conversation
-        }
+        conversation
         .safeAreaInset(edge: .bottom, spacing: 0) {
             composer
         }
@@ -4017,25 +4000,6 @@ struct CopilotView: View {
         .task(id: initialShortcut?.id) {
             guard let initialShortcut else { return }
             store.submitAgentShortcut(initialShortcut)
-        }
-    }
-
-    @ViewBuilder private var newChatButton: some View {
-        if !store.messages.isEmpty {
-            HStack {
-                Spacer()
-                Button {
-                    cancelEditing()
-                    pendingAttachments = []
-                    store.clearChat()
-                } label: {
-                    Label("New chat", systemImage: "square.and.pencil")
-                        .font(.caption.weight(.medium))
-                }
-                .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal)
-            .padding(.top, 14)
         }
     }
 
