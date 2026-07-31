@@ -83,34 +83,44 @@ enum ReminderNotificationScheduler {
 
     static func schedule(_ reminder: Reminder, requestAuthorization: Bool) async {
         await cancel(reminderId: reminder.id)
+        guard !reminder.completed, let time = reminder.reminderTime else { return }
+        let recurring = reminder.repeatRule == "daily" || reminder.repeatRule == "weekly"
+
         // An "important" reminder rings like a real alarm (iOS 26+) instead of a
-        // silent-respecting notification. The alarm replaces the notification so
-        // it doesn't fire twice.
-        if #available(iOS 26.0, *),
-           reminder.important, !reminder.completed,
-           let time = reminder.reminderTime,
-           let fireDate = dueDate(day: reminder.scheduledFor, time: time),
-           fireDate > Date() {
-            await ReminderAlarm.scheduleOnce(
-                id: ReminderAlarmID.make(source: "reminder", sourceId: reminder.id),
-                title: reminder.title,
-                at: fireDate
-            )
+        // silent-respecting notification — recurring or one-time. The alarm replaces
+        // the notification so it never fires twice.
+        if #available(iOS 26.0, *), reminder.important {
+            let alarmId = ReminderAlarmID.make(source: "reminder", sourceId: reminder.id)
+            if recurring, let (hour, minute) = hourMinute(time) {
+                await ReminderAlarm.scheduleWeekly(
+                    id: alarmId, title: reminder.title,
+                    weekdays: alarmWeekdays(rule: reminder.repeatRule, scheduledFor: reminder.scheduledFor),
+                    hour: hour, minute: minute
+                )
+            } else if let fireDate = dueDate(day: reminder.scheduledFor, time: time), fireDate > Date() {
+                await ReminderAlarm.scheduleOnce(id: alarmId, title: reminder.title, at: fireDate)
+            }
             return
         }
-        guard !reminder.completed,
-              reminder.reminderTime != nil,
-              await isAuthorized(requestIfNeeded: requestAuthorization) else { return }
-        await enqueue(
-            source: "reminder",
-            sourceId: reminder.id,
-            title: reminder.title,
-            notes: reminder.notes,
-            scheduledFor: reminder.scheduledFor,
-            reminderTime: reminder.reminderTime,
-            persistent: reminder.repeatUntilCompleted,
-            intervalMinutes: reminder.nudgeIntervalMinutes
-        )
+
+        guard await isAuthorized(requestIfNeeded: requestAuthorization) else { return }
+        if recurring {
+            await enqueueRecurring(
+                source: "reminder", sourceId: reminder.id, title: reminder.title,
+                reminderTime: time, rule: reminder.repeatRule, scheduledFor: reminder.scheduledFor
+            )
+        } else {
+            await enqueue(
+                source: "reminder",
+                sourceId: reminder.id,
+                title: reminder.title,
+                notes: reminder.notes,
+                scheduledFor: reminder.scheduledFor,
+                reminderTime: time,
+                persistent: reminder.repeatUntilCompleted,
+                intervalMinutes: reminder.nudgeIntervalMinutes
+            )
+        }
     }
 
     static func cancel(reminderId: Int) async {
@@ -155,6 +165,21 @@ enum ReminderNotificationScheduler {
             if !pending.isEmpty {
                 await cancel(source: item.source, sourceId: item.sourceId, scheduledFor: item.scheduledFor)
             }
+            return
+        }
+        // Non-important recurring reminders use a single repeating notification,
+        // independent of the per-occurrence one-shot logic below.
+        if item.source == "reminder", !item.completed, item.reminderTime != nil,
+           item.repeatRule == "daily" || item.repeatRule == "weekly" {
+            if recurringRequestIsCurrent(pending, for: item) { return }
+            if !pending.isEmpty {
+                await cancel(source: item.source, sourceId: item.sourceId, scheduledFor: item.scheduledFor)
+            }
+            await enqueueRecurring(
+                source: "reminder", sourceId: item.sourceId, title: item.title,
+                reminderTime: item.reminderTime ?? "", rule: item.repeatRule,
+                scheduledFor: item.scheduledFor
+            )
             return
         }
         guard !item.completed,
@@ -380,12 +405,19 @@ enum ReminderNotificationScheduler {
         guard !item.completed, let time = item.reminderTime else { return false }
         switch item.source {
         case "reminder":
+            let alarmId = ReminderAlarmID.make(source: "reminder", sourceId: item.sourceId)
+            if item.repeatRule == "daily" || item.repeatRule == "weekly",
+               let (hour, minute) = hourMinute(time) {
+                await ReminderAlarm.scheduleWeekly(
+                    id: alarmId, title: item.title,
+                    weekdays: alarmWeekdays(rule: item.repeatRule, scheduledFor: item.scheduledFor),
+                    hour: hour, minute: minute
+                )
+                return true
+            }
             guard let fireDate = dueDate(day: item.scheduledFor, time: time),
                   fireDate > Date() else { return false }
-            await ReminderAlarm.scheduleOnce(
-                id: ReminderAlarmID.make(source: "reminder", sourceId: item.sourceId),
-                title: item.title, at: fireDate
-            )
+            await ReminderAlarm.scheduleOnce(id: alarmId, title: item.title, at: fireDate)
             return true
         case "routine":
             let parts = time.split(separator: ":")
@@ -426,6 +458,73 @@ enum ReminderNotificationScheduler {
         case 7: return .saturday
         default: return nil
         }
+    }
+
+    static func hourMinute(_ time: String) -> (hour: Int, minute: Int)? {
+        let parts = time.split(separator: ":")
+        guard parts.count >= 2, let hour = Int(parts[0]), let minute = Int(parts[1]) else { return nil }
+        return (hour, minute)
+    }
+
+    /// AlarmKit weekdays for a recurrence rule: daily = all seven; weekly = the
+    /// anchor date's weekday.
+    private static func alarmWeekdays(rule: String, scheduledFor: String) -> [Locale.Weekday] {
+        if rule == "daily" {
+            return [.sunday, .monday, .tuesday, .wednesday, .thursday, .friday, .saturday]
+        }
+        if rule == "weekly", let day = weekday(fromAPIDate: scheduledFor) { return [day] }
+        return []
+    }
+
+    /// Schedules one repeating local notification for a recurring, non-important
+    /// reminder (daily = a single hour/minute trigger; weekly = weekday + time).
+    private static func enqueueRecurring(
+        source: String, sourceId: Int, title: String, reminderTime: String,
+        rule: String, scheduledFor: String
+    ) async {
+        guard let (hour, minute) = hourMinute(reminderTime) else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = ""
+        content.sound = .default
+        content.categoryIdentifier = source == "routine"
+            ? routineCategoryIdentifier : reminderCategoryIdentifier
+        content.userInfo = [
+            "schedule_source": source,
+            "source_id": sourceId,
+            "scheduled_for": scheduledFor,
+            "reminder_time": reminderTime,
+            "repeat_rule": rule,
+            "scheduler_version": schedulerVersion,
+        ]
+        var components = DateComponents()
+        components.hour = hour
+        components.minute = minute
+        if rule == "weekly", let day = Calendar.current.dateComponents(
+            [.weekday], from: dueDate(day: scheduledFor, time: reminderTime) ?? Date()
+        ).weekday {
+            components.weekday = day
+        }
+        let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: true)
+        let request = UNNotificationRequest(
+            identifier: "\(prefix(source: source, sourceId: sourceId, scheduledFor: scheduledFor))rec",
+            content: content,
+            trigger: trigger
+        )
+        _ = try? await UNUserNotificationCenter.current().add(request)
+    }
+
+    private static func recurringRequestIsCurrent(
+        _ requests: [UNNotificationRequest], for item: ScheduleItem
+    ) -> Bool {
+        guard let request = requests.first,
+              (request.trigger as? UNCalendarNotificationTrigger)?.repeats == true else { return false }
+        let info = request.content.userInfo
+        return requests.count == 1
+            && request.content.title == item.title
+            && info["reminder_time"] as? String == item.reminderTime
+            && info["repeat_rule"] as? String == item.repeatRule
+            && info["scheduler_version"] as? Int == schedulerVersion
     }
 
     private static func dueDate(day: String, time: String?) -> Date? {

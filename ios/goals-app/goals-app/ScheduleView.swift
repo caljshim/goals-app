@@ -609,6 +609,7 @@ struct AddReminderView: View {
     @State private var repeatUntilCompleted = false
     @State private var nudgeIntervalMinutes = 60
     @State private var important = false
+    @State private var repeatRule = "none"
     @State private var saving = false
     @State private var confirmingDelete = false
 
@@ -629,6 +630,7 @@ struct AddReminderView: View {
         _repeatUntilCompleted = State(initialValue: item.repeatUntilCompleted)
         _nudgeIntervalMinutes = State(initialValue: item.nudgeIntervalMinutes ?? 60)
         _important = State(initialValue: item.important)
+        _repeatRule = State(initialValue: item.repeatRule)
     }
 
     var body: some View {
@@ -640,6 +642,11 @@ struct AddReminderView: View {
                     Toggle("Add a time", isOn: $includesTime)
                     if includesTime {
                         DatePicker("Time", selection: $reminderTime, displayedComponents: .hourAndMinute)
+                        Picker("Repeat", selection: $repeatRule) {
+                            Text("Never").tag("none")
+                            Text("Daily").tag("daily")
+                            Text("Weekly").tag("weekly")
+                        }
                         Toggle(isOn: $important) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Important")
@@ -713,7 +720,8 @@ struct AddReminderView: View {
                     notes: cleanNotes,
                     repeatUntilCompleted: includesTime && !important && repeatUntilCompleted,
                     nudgeIntervalMinutes: includesTime && !important && repeatUntilCompleted ? nudgeIntervalMinutes : nil,
-                    important: includesTime && important
+                    important: includesTime && important,
+                    repeatRule: includesTime ? repeatRule : "none"
                 )
             } else {
                 saved = await store.createReminder(
@@ -723,7 +731,8 @@ struct AddReminderView: View {
                     notes: cleanNotes,
                     repeatUntilCompleted: includesTime && !important && repeatUntilCompleted,
                     nudgeIntervalMinutes: includesTime && !important && repeatUntilCompleted ? nudgeIntervalMinutes : nil,
-                    important: includesTime && important
+                    important: includesTime && important,
+                    repeatRule: includesTime ? repeatRule : "none"
                 )
             }
             saving = false
