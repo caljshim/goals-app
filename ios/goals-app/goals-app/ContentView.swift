@@ -4,6 +4,7 @@ import PhotosUI
 import Charts
 import LinkKit
 import Security
+import UniformTypeIdentifiers
 
 // MARK: - API models
 
@@ -1848,158 +1849,175 @@ enum DashboardReorder {
     }
 }
 
-/// Collects each dashboard row's layout frame (in the "dashReorder" space) so the
-/// lifted card can track the finger and the reorder math can find midpoints.
-struct RowFramePreferenceKey: PreferenceKey {
-    static var defaultValue: [String: CGRect] = [:]
-    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
-        value.merge(nextValue()) { _, new in new }
+private struct DashboardWidgetDropDelegate: DropDelegate {
+    let targetID: String
+    @Binding var widgets: [String]
+    @Binding var draggedID: String?
+    let reduceMotion: Bool
+    let save: () -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedID,
+              draggedID != targetID,
+              let targetIndex = widgets.firstIndex(of: targetID) else {
+            return
+        }
+        let reordered = DashboardReorder.reordered(
+            widgets,
+            move: draggedID,
+            to: targetIndex
+        )
+        guard reordered != widgets else { return }
+        UISelectionFeedbackGenerator().selectionChanged()
+        withAnimation(reduceMotion ? nil : .snappy) {
+            widgets = reordered
+        }
+        save()
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedID = nil
+        save()
+        return true
     }
 }
 
 struct DashboardView: View {
     @EnvironmentObject var store: MoneyStore
     @State private var widgets = DashboardSettings.widgets
-    @AppStorage(LocalUIStateKey.dashboardEditing) private var customizing = false
+    @State private var customizing = false
+    @State private var draggedID: String?
     @SwiftUI.Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    // Reorder session
-    @State private var liftedID: String?
-    @State private var fingerY: CGFloat = 0
-    @State private var rowFrames: [String: CGRect] = [:]
-
-    private let reorderSpace = "dashReorder"
 
     var body: some View {
         ScrollView { LazyVStack(spacing: 16) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Money").font(.system(size: 28, weight: .bold, design: .rounded))
+                Text(customizing ? "Edit dashboard" : "Money")
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
                 Spacer()
-                Text(Date().formatted(.dateTime.month(.wide).year())).font(.subheadline).foregroundStyle(.secondary)
+                if customizing {
+                    Button("Done", action: finishEditing)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.brand)
+                } else {
+                    Text(Date().formatted(.dateTime.month(.wide).year()))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(.bottom, 2)
 
-            if widgets.isEmpty { EmptyWidget(text: "Your dashboard is empty — tap Edit dashboard below to add a widget.") }
+            if customizing {
+                Label("Hold and drag any widget to move it", systemImage: "hand.draw")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            if widgets.isEmpty {
+                EmptyWidget(
+                    text: customizing
+                        ? "Choose a widget below to build your dashboard."
+                        : "Press and hold here to add your first widget."
+                )
+                .contentShape(Rectangle())
+                .onLongPressGesture(minimumDuration: 0.35) {
+                    beginEditing()
+                }
+            }
 
             ForEach(widgets, id: \.self) { id in
-                let isLifted = liftedID == id
-                let isCollapsed = liftedID != nil && !isLifted
-                rowContent(id: id, isCollapsed: isCollapsed)
-                    .background(GeometryReader { geo in
-                        Color.clear.preference(
-                            key: RowFramePreferenceKey.self,
-                            value: [id: geo.frame(in: .named(reorderSpace))]
+                rowContent(id: id)
+                    .animation(.easeOut(duration: 0.16), value: customizing)
+                    .onDrag {
+                        beginEditing(dragging: id)
+                        return NSItemProvider(object: id as NSString)
+                    }
+                    .onDrop(
+                        of: [UTType.text],
+                        delegate: DashboardWidgetDropDelegate(
+                            targetID: id,
+                            widgets: $widgets,
+                            draggedID: $draggedID,
+                            reduceMotion: reduceMotion,
+                            save: save
                         )
-                    })
-                    .scaleEffect(isLifted && !reduceMotion ? 1.03 : 1)
-                    .shadow(color: Theme.shadow, radius: isLifted ? 14 : 0, x: 0, y: isLifted ? 8 : 0)
-                    .offset(y: isLifted ? liftOffset(id) : 0)
-                    .zIndex(isLifted ? 1 : 0)
-                    .gesture(customizing ? reorderGesture(id: id) : nil)
+                    )
             }
 
             if customizing { AddWidgetsPanel(existing: widgets) { id in withAnimation { widgets.append(id) }; save() } }
-            Button(customizing ? "Done" : "Edit dashboard") { withAnimation { customizing.toggle() } }
-                .font(.subheadline.weight(.medium)).foregroundStyle(Theme.brand)
-                .frame(maxWidth: .infinity).padding(.top, 6)
             if customizing { Button("Reset to defaults") { withAnimation { widgets = DashboardSettings.defaults }; save() }.font(.caption).foregroundStyle(.secondary) }
         }.padding() }
-        .coordinateSpace(name: reorderSpace)
-        .onPreferenceChange(RowFramePreferenceKey.self) { rowFrames = $0 }
         .background(Theme.canvas)
         .toolbar(.hidden, for: .navigationBar)
         .refreshable { await store.refreshFinances() }
-        .onAppear { widgets = DashboardSettings.widgets }
+        .onAppear {
+            widgets = DashboardSettings.widgets
+            customizing = false
+            draggedID = nil
+        }
     }
 
     // MARK: Rows
 
-    @ViewBuilder
-    func rowContent(id: String, isCollapsed: Bool) -> some View {
-        if isCollapsed {
-            collapsedChip(id: id)
-        } else if customizing {
-            VStack(spacing: 8) {
-                editHeader(id: id)
-                DashboardWidget(id: id)
-            }
-            .contentShape(Rectangle())
-        } else {
+    func rowContent(id: String) -> some View {
+        ZStack(alignment: .top) {
             DashboardWidget(id: id)
+            if customizing {
+                editControls(id: id)
+                    .offset(y: -12)
+                    .transition(.scale.combined(with: .opacity))
+            }
+        }
+        .padding(.top, customizing ? 10 : 0)
+        .contentShape(Rectangle())
+        .accessibilityAction(named: "Remove from dashboard") {
+            removeWidget(id)
         }
     }
 
-    func editHeader(id: String) -> some View {
+    func editControls(id: String) -> some View {
         HStack {
-            Text(widgetTitle(id)).font(.caption.bold()).foregroundStyle(.secondary)
-            Spacer()
             Button {
                 removeWidget(id)
             } label: {
-                Image(systemName: "minus.circle.fill").foregroundStyle(Theme.negative)
+                Image(systemName: "minus.circle.fill")
+                    .font(.title2)
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, Theme.negative)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Remove \(widgetTitle(id))")
+            Spacer()
             Image(systemName: "line.3.horizontal")
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
+                .frame(width: 32, height: 32)
                 .accessibilityLabel("Drag to reorder")
         }
+        .padding(.horizontal, 6)
     }
 
-    func collapsedChip(id: String) -> some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                if let source = DashboardWidgetRegistry.definition(for: id)?.source.rawValue {
-                    Text(source.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                }
-                Text(widgetTitle(id)).font(.subheadline.weight(.semibold))
+    func beginEditing(dragging id: String? = nil) {
+        if !customizing {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            withAnimation(reduceMotion ? nil : .snappy) {
+                customizing = true
             }
-            Spacer()
-            Image(systemName: "line.3.horizontal").foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 14).padding(.vertical, 12)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.card))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Theme.cardStroke, lineWidth: 1))
-        .contentShape(Rectangle())
+        draggedID = id
     }
 
-    // MARK: Reorder gesture
-
-    func reorderGesture(id: String) -> some Gesture {
-        LongPressGesture(minimumDuration: 0.3)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(reorderSpace)))
-            .onChanged { value in
-                guard case .second(true, let drag?) = value else { return }
-                guard liftedID == nil || liftedID == id else { return }
-                if liftedID == nil {
-                    liftedID = id
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                }
-                fingerY = drag.location.y
-                evaluateReorder()
-            }
-            .onEnded { _ in endReorder() }
-    }
-
-    func liftOffset(_ id: String) -> CGFloat {
-        guard let mid = rowFrames[id]?.midY else { return 0 }
-        return fingerY - mid
-    }
-
-    func evaluateReorder() {
-        guard let liftedID else { return }
-        let midY = rowFrames.mapValues { $0.midY }
-        let target = DashboardReorder.targetIndex(order: widgets, midY: midY, liftedID: liftedID, fingerY: fingerY)
-        let next = DashboardReorder.reordered(widgets, move: liftedID, to: target)
-        if next != widgets {
-            UISelectionFeedbackGenerator().selectionChanged()
-            withAnimation(reduceMotion ? nil : .snappy) { widgets = next }
+    func finishEditing() {
+        withAnimation(reduceMotion ? nil : .snappy) {
+            customizing = false
+            draggedID = nil
         }
-    }
-
-    func endReorder() {
-        withAnimation(reduceMotion ? nil : .snappy) { liftedID = nil }
-        fingerY = 0
         save()
     }
 
