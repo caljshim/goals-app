@@ -4097,6 +4097,16 @@ struct CopilotView: View {
             .onChange(of: sending) { value in
                 if value { scrollToConversationBottom(proxy) }
             }
+            // Keep the latest message riding above the keyboard as it animates in:
+            // the composer's safeAreaInset lifts on its own, but the transcript must
+            // scroll to follow, or the newest reply hides behind the keyboard.
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: UIResponder.keyboardWillChangeFrameNotification
+                )
+            ) { _ in
+                scrollToConversationBottom(proxy)
+            }
             .onAppear {
                 prepareInitialConversation(using: proxy)
             }
@@ -4276,33 +4286,77 @@ private struct CopilotComposer: View {
         input.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var canSend: Bool {
+        (!cleanInput.isEmpty || !pendingAttachments.isEmpty)
+        && !sending
+        && !uploadingImages
+    }
+
+    private var canAttach: Bool {
+        !sending
+        && !uploadingImages
+        && editingMessage == nil
+        && pendingAttachments.count < 4
+    }
+
+    private var sendButton: some View {
+        Button(action: submit) {
+            Group {
+                if sending {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(Theme.onBrand)
+                } else {
+                    Image(systemName: editingMessage == nil ? "arrow.up" : "checkmark")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Theme.onBrand)
+                }
+            }
+            .frame(width: 34, height: 34)
+            .background(
+                Circle().fill(canSend ? Theme.brand : Color.secondary.opacity(0.22))
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(!canSend)
+        .accessibilityLabel(editingMessage == nil ? "Send" : "Save and resend")
+        .animation(.easeOut(duration: 0.16), value: canSend)
+    }
+
     var body: some View {
         VStack(spacing: 8) {
             attachments
             editingBanner
-            HStack {
+            HStack(alignment: .center, spacing: 6) {
                 photoPicker
-                TextField("Ask anything", text: $input, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
+                TextField("Ask Audel anything", text: $input, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.callout)
+                    .lineLimit(1...6)
                     .focused($inputFocused)
                     .submitLabel(.send)
                     .onSubmit(submit)
-                Button(action: submit) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.title)
-                        .foregroundStyle(Theme.brand)
-                        .accessibilityLabel(
-                            editingMessage == nil ? "Send" : "Save and resend"
-                        )
-                }
-                .disabled(
-                    (cleanInput.isEmpty && pendingAttachments.isEmpty)
-                    || sending
-                    || uploadingImages
-                )
+                    .padding(.leading, 2)
+                    .padding(.vertical, 4)
+                sendButton
             }
+            .padding(6)
+            .background(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(Theme.card)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .strokeBorder(
+                        inputFocused ? Theme.brand.opacity(0.55) : Theme.cardStroke,
+                        lineWidth: inputFocused ? 1.5 : 1
+                    )
+            )
+            .animation(.easeOut(duration: 0.16), value: inputFocused)
         }
-        .padding()
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
         .background(.bar)
         .onChange(of: editingMessage?.id) { _ in
             guard let editingMessage else { return }
@@ -4361,19 +4415,19 @@ private struct CopilotComposer: View {
             maxSelectionCount: max(1, 4 - pendingAttachments.count),
             matching: .images
         ) {
-            if uploadingImages {
-                ProgressView()
-            } else {
-                Image(systemName: "photo.badge.plus")
-                    .font(.title3)
+            Group {
+                if uploadingImages {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "photo.badge.plus")
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundStyle(canAttach ? Theme.brand : Color.secondary.opacity(0.5))
+                }
             }
+            .frame(width: 34, height: 34)
         }
-        .disabled(
-            sending
-            || uploadingImages
-            || editingMessage != nil
-            || pendingAttachments.count >= 4
-        )
+        .disabled(!canAttach)
         .accessibilityLabel("Attach photos")
         .onChange(of: selectedPhotoItems) { items in
             guard !items.isEmpty else { return }

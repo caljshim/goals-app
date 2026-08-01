@@ -66,78 +66,103 @@ private struct ScheduleDaySelection: Identifiable {
 
 enum ScheduleSwipeReveal {
     static let actionWidth: CGFloat = 84
+    /// Crisp, low-tail settle — no lingering spring bounce at the end of a slide.
+    static let settleAnimation: Animation = .snappy(duration: 0.24, extraBounce: 0)
+}
 
-    static func settledOffset(
-        current: CGFloat,
-        translation: CGSize
-    ) -> CGFloat {
-        guard abs(translation.width) > abs(translation.height) else {
-            return current
+enum ScheduleSwipeAction {
+    case end
+    case delete
+
+    var accessibilityLabel: String {
+        switch self {
+        case .end: return "End routine"
+        case .delete: return "Delete reminder"
         }
-        let proposed = current + translation.width
-        return proposed < -(actionWidth / 2) ? -actionWidth : 0
     }
 }
 
-private struct SwipeToEndRoutineRow<Content: View>: View {
-    let onEnd: () -> Void
+/// Swipe-left-to-reveal a single destructive action. At rest the action is parked
+/// just off the trailing edge (clipped away, so nothing shows); as the row is pulled
+/// left it slides in alongside. Only two layers translate — no per-frame resizing —
+/// so it stays smooth. A tap on an open row closes it rather than firing the action.
+private struct SwipeToDeleteRow<Content: View>: View {
+    let action: ScheduleSwipeAction
+    let onCommit: () -> Void
     @ViewBuilder let content: () -> Content
-    @State private var restingOffset: CGFloat = 0
-    @GestureState private var dragOffset: CGFloat = 0
 
-    private var visibleOffset: CGFloat {
-        max(
-            -ScheduleSwipeReveal.actionWidth,
-            min(0, restingOffset + dragOffset)
-        )
-    }
+    /// Live position of the row (0 = closed, -actionWidth = fully open).
+    @State private var offset: CGFloat = 0
+    /// Position the last drag settled at, so a new drag resumes from there.
+    @State private var settledOffset: CGFloat = 0
+    @State private var isOpen = false
 
     var body: some View {
         ZStack(alignment: .trailing) {
-            Button(role: .destructive) {
-                withAnimation(.snappy) { restingOffset = 0 }
-                onEnd()
-            } label: {
-                VStack(spacing: 3) {
-                    Image(systemName: "trash")
-                    Text("End")
-                        .font(.caption2.weight(.semibold))
-                }
+            // A plain rectangular surface, not a `Button`: on the iOS 26 SDK a
+            // `Button` carries a rounded Liquid-Glass background that shows as a
+            // curved corner while the action slides through the clip.
+            Image(systemName: "trash")
+                .font(.body.weight(.semibold))
                 .foregroundStyle(.white)
                 .frame(width: ScheduleSwipeReveal.actionWidth)
                 .frame(maxHeight: .infinity)
                 .background(Theme.negative)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("End routine")
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    close()
+                    onCommit()
+                }
+                // Parked off the trailing edge at rest (clipped away); slides in with
+                // the row as it's pulled left, so it's only visible during/after a swipe.
+                .offset(x: ScheduleSwipeReveal.actionWidth + offset)
+                .accessibilityLabel(action.accessibilityLabel)
+                .accessibilityAddTraits(.isButton)
 
             content()
                 .background(Theme.card)
-                .offset(x: visibleOffset)
+                .offset(x: offset)
+                .overlay {
+                    // While open, swallow taps so the primary action can't fire;
+                    // a tap simply closes the row.
+                    if isOpen {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture { close() }
+                    }
+                }
                 .simultaneousGesture(swipeGesture)
         }
         .clipped()
-        .accessibilityAction(named: "End routine") {
-            onEnd()
+        .accessibilityAction(named: action.accessibilityLabel) {
+            onCommit()
         }
+    }
+
+    private func close() {
+        settledOffset = 0
+        isOpen = false
+        withAnimation(ScheduleSwipeReveal.settleAnimation) { offset = 0 }
     }
 
     private var swipeGesture: some Gesture {
         DragGesture(minimumDistance: 12)
-            .updating($dragOffset) { value, state, _ in
+            .onChanged { value in
                 guard abs(value.translation.width) > abs(value.translation.height) else {
                     return
                 }
-                state = value.translation.width
+                // Track the finger 1:1 — plain state, no gesture-reset jump.
+                offset = min(0, max(-ScheduleSwipeReveal.actionWidth,
+                                    settledOffset + value.translation.width))
             }
             .onEnded { value in
-                let target = ScheduleSwipeReveal.settledOffset(
-                    current: restingOffset,
-                    translation: value.translation
-                )
-                withAnimation(.snappy) {
-                    restingOffset = target
-                }
+                let projected = settledOffset + value.translation.width
+                let target: CGFloat = projected < -ScheduleSwipeReveal.actionWidth / 2
+                    ? -ScheduleSwipeReveal.actionWidth
+                    : 0
+                settledOffset = target
+                isOpen = target != 0
+                withAnimation(ScheduleSwipeReveal.settleAnimation) { offset = target }
             }
     }
 }
@@ -332,7 +357,7 @@ struct ScheduleAgendaWidget: View {
     }
 
     var body: some View {
-        WidgetCard(Calendar.current.isDateInToday(date) ? "Today" : date.formatted(.dateTime.weekday(.wide).month(.abbreviated).day())) {
+        WidgetCard(Calendar.current.isDateInToday(date) ? "Today" : date.formatted(.dateTime.weekday(.wide).month(.abbreviated).day()), showsShadow: false) {
             if dayItems.isEmpty {
                 Label("Nothing scheduled", systemImage: "calendar.badge.checkmark")
                     .font(.subheadline).foregroundStyle(.secondary)
@@ -361,12 +386,18 @@ struct ScheduleAgendaWidget: View {
 
     @ViewBuilder private func interactiveRow(_ item: ScheduleItem) -> some View {
         if item.source == "routine" {
-            SwipeToEndRoutineRow {
+            SwipeToDeleteRow(action: .end) {
                 Task { await store.endGoal(item.sourceId) }
             } content: {
                 editableAgendaRow(item)
             }
-        } else if item.source == "reminder" || item.source == "event" {
+        } else if item.source == "reminder" {
+            SwipeToDeleteRow(action: .delete) {
+                Task { await store.deleteReminder(item) }
+            } content: {
+                editableAgendaRow(item)
+            }
+        } else if item.source == "event" {
             editableAgendaRow(item)
         } else {
             agendaRow(item)
@@ -386,48 +417,48 @@ struct ScheduleAgendaWidget: View {
 
     private func agendaRow(_ item: ScheduleItem) -> some View {
         HStack(spacing: 8) {
-            Button {
-                performPrimaryAction(for: item)
-            } label: {
-                HStack(spacing: 11) {
+            HStack(spacing: 11) {
                 Image(systemName: symbol(for: item))
                     .font(.title3)
                     .foregroundStyle(color(for: item))
                     .frame(width: 24)
 
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(item.title)
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.primary)
-                            .strikethrough(item.completed)
-                        if item.source != "reminder" {
-                            HStack(spacing: 5) {
-                                Text(sourceLabel(item))
-                                if let notes = item.notes, item.source == "event" {
-                                    Text("· \(notes)").lineLimit(1)
-                                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.title)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.primary)
+                        .strikethrough(item.completed)
+                    if item.source != "reminder" {
+                        HStack(spacing: 5) {
+                            Text(sourceLabel(item))
+                            if let notes = item.notes, item.source == "event" {
+                                Text("· \(notes)").lineLimit(1)
                             }
-                            .font(.caption)
-                            .foregroundStyle(
-                                item.missed ? Theme.negative : Color.secondary
-                            )
                         }
-                    }
-                    Spacer()
-                    if let time = item.reminderTime {
-                        Text(timeLabel(item, start: time))
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
+                        .font(.caption)
+                        .foregroundStyle(
+                            item.missed ? Theme.negative : Color.secondary
+                        )
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+                Spacer()
+                if let time = item.reminderTime {
+                    Text(timeLabel(item, start: time))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
-            .buttonStyle(.plain)
-            .disabled(
-                (item.source == "reminder" || item.source == "routine")
-                && item.scheduledFor > Date().apiDate
-            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .opacity(primaryActionDisabled(item) ? 0.5 : 1)
+            // A TapGesture won't recognize once the finger has traveled past its
+            // slop, so a swipe-and-lift can't fire this — only a genuine tap does.
+            .onTapGesture {
+                guard !primaryActionDisabled(item) else { return }
+                performPrimaryAction(for: item)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton)
             .accessibilityHint(primaryActionHint(for: item))
 
             if (item.source == "reminder" || item.source == "routine"),
@@ -461,6 +492,11 @@ struct ScheduleAgendaWidget: View {
             }
         }
         .contentShape(Rectangle())
+    }
+
+    private func primaryActionDisabled(_ item: ScheduleItem) -> Bool {
+        (item.source == "reminder" || item.source == "routine")
+            && item.scheduledFor > Date().apiDate
     }
 
     private func performPrimaryAction(for item: ScheduleItem) {

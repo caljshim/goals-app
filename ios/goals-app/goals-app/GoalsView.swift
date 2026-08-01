@@ -614,7 +614,9 @@ struct GoalCategoryWidget: View {
             if focused {
                 headerContent
             } else {
-                Button { withAnimation { expanded.toggle() } } label: { headerContent }
+                Button { withAnimation { expanded.toggle() } } label: {
+                    headerContent.contentShape(Rectangle())
+                }
                     .buttonStyle(.plain)
             }
         }
@@ -846,7 +848,7 @@ struct GoalRow: View {
     }
 
     private var rowContent: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     Text(goal.name)
@@ -899,7 +901,7 @@ struct GoalRow: View {
             }
             Button { showingDetail = true } label: {
                 Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
-                    .frame(width: 26, height: 34).contentShape(Rectangle())
+                    .frame(width: 26, height: 28).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Details for \(goal.name)")

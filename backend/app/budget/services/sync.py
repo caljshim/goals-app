@@ -40,20 +40,48 @@ def _natural_match(
         select(Transaction).where(
             Transaction.account_id == account_id,
             Transaction.date == data["date"],
-            Transaction.name == data["name"],
-            Transaction.merchant_name == data["merchant_name"],
             Transaction.amount == data["amount"],
             Transaction.pending == data["pending"],
         )
     ).all()
-    return next(
-        (row for row in candidates if row.id in eligible_rows and row.id not in claimed_rows),
+    available = [
+        row for row in candidates
+        if row.id in eligible_rows and row.id not in claimed_rows
+    ]
+
+    # Plaid may replay the same posted transaction under a new transaction ID
+    # after a relink while dropping merchant enrichment (merchant_name becomes
+    # null and the category becomes OTHER). The raw statement name remains
+    # stable in that case, so prefer it over the optional cleaned merchant.
+    raw_name = _normalize_identity(data["name"])
+    raw_match = next(
+        (row for row in available if _normalize_identity(row.name) == raw_name),
         None,
     )
+    if raw_match is not None:
+        return raw_match
+
+    # Plaid can also rewrite the raw description while retaining its cleaned
+    # merchant. Keep that existing fallback, but only when both sides actually
+    # have merchant data so generic/missing merchants cannot merge transactions.
+    merchant = _normalize_identity(data["merchant_name"])
+    if merchant:
+        return next(
+            (
+                row for row in available
+                if _normalize_identity(row.merchant_name) == merchant
+            ),
+            None,
+        )
+    return None
+
+
+def _normalize_identity(value: str | None) -> str:
+    return " ".join((value or "").strip().casefold().split())
 
 
 def _merchant_identity(name: str | None, merchant_name: str | None) -> str:
-    return " ".join((merchant_name or name or "").strip().casefold().split())
+    return _normalize_identity(merchant_name or name)
 
 
 def _natural_key(account_id: int, data: dict) -> tuple:

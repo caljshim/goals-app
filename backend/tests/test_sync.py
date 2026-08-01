@@ -82,6 +82,117 @@ def test_incremental_sync_updates_preexisting_row_via_batched_index(monkeypatch)
     assert rows[0].amount == 6.25
 
 
+def test_initial_relink_matches_raw_name_when_merchant_enrichment_disappears(monkeypatch):
+    s = make_session()
+    item = PlaidItem(plaid_item_id="item_1", access_token="tok")
+    s.add(item); s.commit(); s.refresh(item)
+    account = Account(
+        plaid_account_id="acc_1",
+        item_id=item.id,
+        name="Credit card",
+        type="credit",
+    )
+    s.add(account); s.commit(); s.refresh(account)
+    original = Transaction(
+        plaid_transaction_id="old-item-transaction",
+        account_id=account.id,
+        date=date(2026, 7, 1),
+        name="APF*M M Property Managem",
+        merchant_name="M M Property Management",
+        amount=1282.22,
+        category="GENERAL_SERVICES",
+        pending=False,
+        user_category="RENT_AND_UTILITIES",
+    )
+    s.add(original); s.commit(); s.refresh(original)
+
+    replay = {
+        "plaid_transaction_id": "new-item-transaction",
+        "plaid_account_id": "acc_1",
+        "date": date(2026, 7, 1),
+        "name": "APF*M M Property Managem",
+        "merchant_name": None,
+        "amount": 1282.22,
+        "category": "OTHER",
+        "pending": False,
+    }
+    monkeypatch.setattr(plaid_client, "sync_transactions", lambda client, token, cursor: {
+        "added": [replay],
+        "modified": [],
+        "removed": [],
+        "next_cursor": "end",
+        "has_more": False,
+    })
+
+    counts = sync_item(s, item, client=None)
+
+    rows = s.exec(select(Transaction)).all()
+    assert counts["added"] == 1
+    assert counts["deduplicated"] == 0
+    assert len(rows) == 1
+    assert rows[0].id == original.id
+    assert rows[0].plaid_transaction_id == "new-item-transaction"
+    assert rows[0].user_category == "RENT_AND_UTILITIES"
+
+
+def test_initial_relink_does_not_merge_distinct_same_amount_transactions(monkeypatch):
+    s = make_session()
+    item = PlaidItem(plaid_item_id="item_1", access_token="tok")
+    s.add(item); s.commit(); s.refresh(item)
+    account = Account(
+        plaid_account_id="acc_1",
+        item_id=item.id,
+        name="Checking",
+        type="depository",
+    )
+    s.add(account); s.commit(); s.refresh(account)
+    s.add_all([
+        Transaction(
+            plaid_transaction_id=f"old-{index}",
+            account_id=account.id,
+            date=date(2026, 7, 1),
+            name=name,
+            merchant_name=None,
+            amount=-27.0,
+            category="TRANSFER_IN",
+            pending=False,
+        )
+        for index, name in enumerate(("Zelle payment from Ryan", "Zelle payment from Rohit"))
+    ])
+    s.commit()
+
+    replays = [
+        {
+            "plaid_transaction_id": f"new-{index}",
+            "plaid_account_id": "acc_1",
+            "date": date(2026, 7, 1),
+            "name": name,
+            "merchant_name": None,
+            "amount": -27.0,
+            "category": "TRANSFER_IN",
+            "pending": False,
+        }
+        for index, name in enumerate(("Zelle payment from Ryan", "Zelle payment from Rohit"))
+    ]
+    monkeypatch.setattr(plaid_client, "sync_transactions", lambda client, token, cursor: {
+        "added": replays,
+        "modified": [],
+        "removed": [],
+        "next_cursor": "end",
+        "has_more": False,
+    })
+
+    sync_item(s, item, client=None)
+
+    rows = s.exec(select(Transaction)).all()
+    assert len(rows) == 2
+    assert {row.plaid_transaction_id for row in rows} == {"new-0", "new-1"}
+    assert {row.name for row in rows} == {
+        "Zelle payment from Ryan",
+        "Zelle payment from Rohit",
+    }
+
+
 def test_authoritative_reconciliation_removes_only_stale_relink_copies(monkeypatch):
     s = make_session()
     item = PlaidItem(
