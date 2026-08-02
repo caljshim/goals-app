@@ -64,3 +64,7 @@ def test_tool_error_is_surfaced_to_model_not_raised(monkeypatch):
     assert out["reply"] == "Connect tastytrade first."
     followup = client.messages.calls[1]["messages"][-1]["content"][0]
     assert "not configured" in followup["content"]
+
+
+def test_investing_agent_exposes_only_the_read_only_portfolio_tool():
+    assert {tool["name"] for tool in assistant.TOOLS} == {"get_portfolio"}

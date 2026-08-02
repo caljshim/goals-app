@@ -1,0 +1,11 @@
+- Add a goal completion insight endpoint that returns a cohort percentile, sample size, comparison metric, and statistic.
+- Assign every goal a cached cohort key from its kind, unit, direction, cadence, target range, and category.
+- Classify goal cohorts with deterministic rules and synonyms before using any model.
+- Use embedding similarity against a fixed goal taxonomy only when rule-based cohort classification is uncertain.
+- Cache cohort classification so a goal is never repeatedly categorized with tokens.
+- Record anonymized goal completion events without goal names, financial details, or other sensitive user data.
+- Precompute cohort counts and percentile distributions on a scheduled background job.
+- Compare completion speed only among users with sufficiently similar goal types and difficulty ranges.
+- Require a privacy-safe minimum cohort size before showing comparisons with other users.
+- Fall back to a personal completion statistic whenever a trustworthy cohort comparison is unavailable.
+- Restore optional per-goal icon, color, and inline focus-mode customization after the group editing experience is settled.

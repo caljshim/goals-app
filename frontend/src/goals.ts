@@ -1,5 +1,9 @@
 import type { Goal } from "./types";
 
+export function isRoutine(goal: Goal): boolean {
+  return goal.period !== "once";
+}
+
 // Local day key ("YYYY-MM-DD") of a stored (UTC) timestamp.
 function dayKey(iso: string): string {
   const s = /[Zz]$|[+-]\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`;
@@ -8,15 +12,20 @@ function dayKey(iso: string): string {
 }
 
 // Collapse a value history into one point PER DAY (the day's last value), carrying the
-// value forward across days with no entry — so the chart's x-axis is real days, not inputs.
-export function dailySeries(history: { value: number; at: string }[]): { day: string; value: number }[] {
+// value forward through quiet days and today — so the x-axis is time, not database writes.
+// `throughDay` keeps tests and ended-goal callers deterministic when they need a fixed end.
+export function dailySeries(
+  history: { value: number; at: string }[],
+  throughDay = dayKey(new Date().toISOString()),
+): { day: string; value: number }[] {
   if (history.length === 0) return [];
   const byDay = new Map<string, number>();
   for (const h of history) byDay.set(dayKey(h.at), h.value); // later entries overwrite -> last of the day
   const keys = [...byDay.keys()].sort();
   const out: { day: string; value: number }[] = [];
   const cur = new Date(`${keys[0]}T00:00:00`);
-  const end = new Date(`${keys[keys.length - 1]}T00:00:00`);
+  const endKey = throughDay > keys[keys.length - 1] ? throughDay : keys[keys.length - 1];
+  const end = new Date(`${endKey}T00:00:00`);
   let last = byDay.get(keys[0]) as number;
   while (cur <= end) {
     const k = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, "0")}-${String(cur.getDate()).padStart(2, "0")}`;
@@ -31,16 +40,25 @@ export function dailySeries(history: { value: number; at: string }[]): { day: st
 // every member shares a unit and has a target (e.g. all lbs -> 850/1000), otherwise the
 // average of each member's %. null when nothing is measurable.
 export function groupAggregate(goals: Goal[]): number | null {
+  if (goals.length > 0 && goals.every((g) => g.kind === "streak")) return null;
   const measurable = goals.filter((g) => g.target != null && g.target !== 0);
   if (measurable.length === 0) return null;
   const units = new Set(measurable.map((g) => g.unit));
-  if (units.size === 1) {
+  const directions = new Set(measurable.map((g) => g.direction));
+  if (units.size === 1 && directions.size === 1 && directions.has("reach")) {
     const cur = measurable.reduce((s, g) => s + g.current_value, 0);
     const tgt = measurable.reduce((s, g) => s + (g.target ?? 0), 0);
-    return tgt ? Math.round((cur / tgt) * 1000) / 10 : null;
+    if (!tgt) return null;
+    const raw = (cur / tgt) * 100;
+    return Math.round(raw * 10) / 10;
   }
   const pcts = measurable.map((g) => g.pct ?? 0);
   return Math.round((pcts.reduce((a, b) => a + b, 0) / pcts.length) * 10) / 10;
+}
+
+export function groupAggregateIsReversed(goals: Goal[]): boolean {
+  const measurable = goals.filter((g) => g.target != null && g.target !== 0);
+  return measurable.length > 0 && measurable.every((g) => g.direction === "under");
 }
 
 function mdFromKey(day: string): string {
@@ -51,7 +69,7 @@ function mdFromKey(day: string): string {
 // Merge a category's goals into ONE dataset for a combined chart: one series per goal,
 // aligned by day. If the goals share a unit, plots raw values; otherwise normalizes each
 // to % of its target so different scales overlay meaningfully. Goals with no history are
-// dropped. `data` rows are keyed by goal name; missing days are left absent (line gaps).
+// dropped. `data` rows are keyed by goal name and active series extend through today.
 export function categorySeries(goals: Goal[]): {
   data: Record<string, number | string>[];
   keys: string[];

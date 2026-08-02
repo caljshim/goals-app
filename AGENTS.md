@@ -25,19 +25,25 @@
 - The copilot/agents must never execute a trade without an explicit user confirmation step.
 
 ## Structure
-- Backend: FastAPI + SQLite in `backend/` (venv at `backend/.venv`), port 8100.
+- Backend: FastAPI + PostgreSQL 18 in `backend/` (venv at `backend/.venv`), port 8100.
   - `app/budget/` — Plaid budgeting: models, db, categories, plaid_client, schemas,
     `routers/`, `services/` (incl. the budgeting specialist `services/assistant.py`).
   - `app/invest/` — tastytrade read-only: `tasty.py`, `portfolio.py` (router),
     `assistant.py` (investing specialist).
   - `app/copilot/` — orchestrator `agent.py` (tools `ask_budgeting`/`ask_investing`) +
     `router.py` serving the single `/api/assistant/chat`.
+  - `app/auto_integration/` — agent-researched connector proposals with explicit
+    approval, goal bindings, safe read-only HTTP execution, JSONB audit history,
+    and normalized goal measurements.
+  - `app/media/` — normalized private image uploads used by multimodal Copilot
+    messages and planner-to-calendar ingestion.
   - `app/config.py` — merged Settings (Plaid + tastytrade + Anthropic). One `.env`.
   - `app/main.py` — wires all routers.
 - Frontend: React + Vite in `frontend/`, port 5273 (proxy targets 127.0.0.1:8100 —
   keep IPv4, `localhost` breaks on Windows). Tabs: Dashboard/Transactions/Accounts/
   Budgets/Invest, plus one `CopilotChat` sidebar.
-- User data lives in `backend/money.db` (git-ignored).
+- User data lives in the PostgreSQL database selected by `DATABASE_URL` (`audel`
+  locally).
 
 ## General
 - Prefer minimal, focused edits over broad refactors. Keep the budgeting and investing

@@ -2,7 +2,12 @@ __pycache__/
 *.pyc
 .venv/
 .env
+.env.local
+Secrets.xcconfig
 *.db
+*.db.*
+.DS_Store
+ios/goals-app/goals-app.xcodeproj/xcshareddata/xcschemes/goals-app.xcscheme
 node_modules/
 dist/
 .playwright-mcp/

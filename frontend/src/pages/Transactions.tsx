@@ -1,13 +1,18 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import ExpensePicker from "../components/ExpensePicker";
 import MerchantRules from "../components/MerchantRules";
+import UnbudgetedTransactionsNotice from "../components/UnbudgetedTransactionsNotice";
 import { formatCurrency, formatDateFull, prettifyCategory } from "../format";
 import { filterTransactions } from "../search";
 import { isIncomingZelle } from "../zelle";
 import type { Account, Transaction } from "../types";
 
-export default function Transactions() {
+export default function Transactions({
+  onTransactionsChange,
+}: {
+  onTransactionsChange?: (transactions: Transaction[]) => void;
+}) {
   const [rows, setRows] = useState<Transaction[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [query, setQuery] = useState("");
@@ -18,13 +23,16 @@ export default function Transactions() {
   const [rulesSignal, setRulesSignal] = useState(0);
 
   // Load once; search filters client-side (no per-keystroke API calls).
-  const load = () => {
+  const load = useCallback(() => {
     api.getTransactions()
-      .then(setRows)
+      .then((transactions) => {
+        setRows(transactions);
+        onTransactionsChange?.(transactions);
+      })
       .catch(() => setError("Failed to load transactions. Please try again."));
-  };
+  }, [onTransactionsChange]);
   useEffect(() => { api.getAccounts().then(setAccounts); }, []);
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [load]);
 
   const visible = filterTransactions(rows, query);
 
@@ -125,6 +133,8 @@ export default function Transactions() {
 
       <MerchantRules signal={rulesSignal} onChange={load} />
 
+      <UnbudgetedTransactionsNotice transactions={rows} onCategorized={load} />
+
       <div className="flex items-center gap-2 mb-3">
         <input placeholder="Search merchant, description, or category…" value={query}
           onChange={(e) => setQuery(e.target.value)} className="border rounded px-2 py-1 w-80" />
@@ -183,6 +193,9 @@ export default function Transactions() {
                       onKeyDown={(e) => { if (e.key === "Enter") applyRule(t); }}
                       className="border rounded px-1 py-0.5 w-40"
                       title="Enter (or ‘apply to merchant’) saves a rule for this merchant" />
+                    {t.is_budgeted === false && (
+                      <div className="mt-1 text-[11px] font-medium text-amber-700">⚑ No matching budget</div>
+                    )}
                     {draftFor(t).trim() && draftFor(t) !== t.effective_category && (
                       <div className="text-[11px] mt-0.5 flex gap-2">
                         <button onClick={() => applyRule(t)} className="text-sky-600 hover:text-sky-800">

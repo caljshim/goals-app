@@ -6,7 +6,8 @@ function tx(p: Partial<Transaction>): Transaction {
   return {
     id: 1, account_id: 1, date: "2026-07-01", name: "x", merchant_name: null,
     amount: 10, category: null, user_category: null, effective_category: "UNCATEGORIZED",
-    pending: false, is_manual: false, reimburses_transaction_id: null, ...p,
+    pending: false, is_manual: false, reimburses_transaction_id: null,
+    reimbursement_category: null, is_budgeted: false, ...p,
   };
 }
 
@@ -42,11 +43,11 @@ describe("zelle helpers", () => {
     const list = [
       tx({ id: 10, amount: 180, effective_category: "FOOD_AND_DRINK", date: "2026-07-12" }),
       tx({ id: 11, amount: 30, effective_category: "ENTERTAINMENT", date: "2026-07-15" }),
-      tx({ id: 20, amount: -60, category: "TRANSFER_IN", name: "Zelle from Ryan", date: "2026-07-14", reimburses_transaction_id: 10 }),
-      tx({ id: 21, amount: -40, category: "TRANSFER_IN", name: "Zelle from Mom", date: "2026-07-20", reimburses_transaction_id: 10 }),
-      tx({ id: 22, amount: -10, category: "TRANSFER_IN", name: "Zelle for movie", date: "2026-07-16", reimburses_transaction_id: 11 }),
+      tx({ id: 20, amount: -60, category: "TRANSFER_IN", name: "Zelle from Ryan", date: "2026-07-14", reimburses_transaction_id: 10, reimbursement_category: "FOOD_AND_DRINK" }),
+      tx({ id: 21, amount: -40, category: "TRANSFER_IN", name: "Zelle from Mom", date: "2026-07-20", reimburses_transaction_id: 10, reimbursement_category: "FOOD_AND_DRINK" }),
+      tx({ id: 22, amount: -10, category: "TRANSFER_IN", name: "Zelle for movie", date: "2026-07-16", reimburses_transaction_id: 11, reimbursement_category: "ENTERTAINMENT" }),
       // category-only reimbursement assigned directly to FOOD_AND_DRINK
-      tx({ id: 30, amount: -25, category: "TRANSFER_IN", name: "Zelle from Sam", date: "2026-07-18", user_category: "FOOD_AND_DRINK", effective_category: "FOOD_AND_DRINK" }),
+      tx({ id: 30, amount: -25, category: "TRANSFER_IN", name: "Zelle from Sam", date: "2026-07-18", user_category: "FOOD_AND_DRINK", effective_category: "FOOD_AND_DRINK", reimbursement_category: "FOOD_AND_DRINK" }),
       // kept transfer — not a reimbursement to any category
       tx({ id: 23, amount: -99, category: "TRANSFER_IN", name: "kept", date: "2026-07-01", user_category: "TRANSFER_IN", effective_category: "TRANSFER_IN" }),
     ];

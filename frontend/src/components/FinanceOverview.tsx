@@ -1,12 +1,13 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Bar, BarChart, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { api } from "../api";
 import CategoryTransactions from "../components/CategoryTransactions";
+import UnbudgetedTransactionsNotice from "./UnbudgetedTransactionsNotice";
 import { formatCurrency, prettifyCategory } from "../format";
 import { reimbursementsForCategory } from "../zelle";
-import type { Summary, Transaction } from "../types";
+import type { BudgetPeriod, BudgetProgress, Summary, Transaction } from "../types";
 
 const COLORS = ["#0ea5e9", "#6366f1", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#14b8a6", "#f43f5e"];
 
@@ -38,22 +39,38 @@ function Tile({ label, value, tone }: { label: string; value: number; tone?: str
   );
 }
 
-export default function FinanceOverview() {
+export default function FinanceOverview({
+  onOpenTransactions,
+  onTransactionsChange,
+}: {
+  onOpenTransactions?: () => void;
+  onTransactionsChange?: (transactions: Transaction[]) => void;
+}) {
   const [s, setS] = useState<Summary | null>(null);
   const [selectedMonths, setSelectedMonths] = useState<Set<string> | null>(null);
   const [monthTxns, setMonthTxns] = useState<Transaction[]>([]);
   const [openBudgets, setOpenBudgets] = useState<Set<string>>(new Set());
-  const loadSummary = () => {
-    api.getSummary(currentMonth()).then(setS);
-    // current month's transactions feed the budget drilldowns
-    api.getTransactions({ start: `${currentMonth()}-01` }).then(setMonthTxns);
-  };
+  const loadSummary = useCallback(() => {
+    api.getSummary(currentMonth()).then((summary) => {
+      setS(summary);
+      // Include the earliest active budget window; a Sunday-start week can cross
+      // the month boundary even when the overview is showing the current month.
+      const start = summary.budget_progress.reduce(
+        (earliest, budget) => budget.window_start < earliest ? budget.window_start : earliest,
+        `${currentMonth()}-01`,
+      );
+      api.getTransactions({ start }).then((transactions) => {
+        setMonthTxns(transactions);
+        onTransactionsChange?.(transactions);
+      });
+    });
+  }, [onTransactionsChange]);
   useEffect(() => {
     loadSummary();
     // Tabbing back to the app refetches instantly — local read, costs nothing.
     window.addEventListener("focus", loadSummary);
     return () => window.removeEventListener("focus", loadSummary);
-  }, []);
+  }, [loadSummary]);
   if (!s) return <p className="text-slate-500">Loading…</p>;
 
   // Averages for the top tiles: default to the last 3 months the data fully covers
@@ -77,7 +94,12 @@ export default function FinanceOverview() {
   const avgIncome = chosen.reduce((sum, m) => sum + m.income, 0) / divisor;
   const avgExpense = chosen.reduce((sum, m) => sum + m.expense, 0) / divisor;
   const avgNet = avgIncome - avgExpense;
-  const totalLeft = s.budget_progress.reduce((sum, b) => sum + b.remaining, 0);
+  const periodTotals = (["daily", "weekly", "monthly"] as BudgetPeriod[]).map((period) => ({
+    period,
+    remaining: s.budget_progress.filter((budget) => budget.period === period)
+      .reduce((sum, budget) => sum + budget.remaining, 0),
+    count: s.budget_progress.filter((budget) => budget.period === period).length,
+  }));
 
   const toggleBudget = (category: string) =>
     setOpenBudgets((prev) => {
@@ -89,19 +111,21 @@ export default function FinanceOverview() {
 
   // This month's spending in a budget category, grouped by merchant (largest first).
   // Mirrors the backend's "spent": expenses only (amount >= 0).
-  const merchantsFor = (category: string) => {
-    const byMerchant = new Map<string, { total: number; count: number; last: string }>();
-    for (const t of monthTxns) {
-      if (t.effective_category !== category || t.amount < 0) continue;
+  const transactionsForBudget = (budget: BudgetProgress) => monthTxns.filter(
+    (transaction) => transaction.date >= budget.window_start && transaction.date <= budget.window_end);
+  const merchantsFor = (budget: BudgetProgress) => {
+    const byMerchant = new Map<string, { total: number; dates: Set<string>; last: string }>();
+    for (const t of transactionsForBudget(budget)) {
+      if (t.effective_category !== budget.category || t.amount < 0) continue;
       const k = t.merchant_name ?? t.name;
-      const g = byMerchant.get(k) ?? { total: 0, count: 0, last: "" };
+      const g = byMerchant.get(k) ?? { total: 0, dates: new Set<string>(), last: "" };
       g.total += t.amount;
-      g.count += 1;
+      g.dates.add(t.date);
       if (t.date > g.last) g.last = t.date; // ISO strings compare chronologically
       byMerchant.set(k, g);
     }
     return [...byMerchant.entries()]
-      .map(([name, g]) => ({ name, ...g }))
+      .map(([name, g]) => ({ name, total: g.total, count: g.dates.size, last: g.last }))
       .sort((a, b) => b.total - a.total);
   };
 
@@ -118,34 +142,43 @@ export default function FinanceOverview() {
 
   return (
     <div className="grid gap-4">
+      <UnbudgetedTransactionsNotice
+        transactions={monthTxns}
+        onOpenTransactions={onOpenTransactions}
+        onCategorized={loadSummary}
+      />
       <div className="bg-white rounded-xl border border-slate-200 p-4">
         <div className="flex items-baseline justify-between mb-3">
           <h3 className="font-semibold">Left to spend</h3>
-          {s.budget_progress.length > 0 && (
-            <span className={`text-lg font-bold ${totalLeft < 0 ? "text-red-500" : "text-emerald-600"}`}>
-              {formatCurrency(totalLeft)} left
-            </span>
-          )}
         </div>
+        {s.budget_progress.length > 0 && <div className="mb-4 grid grid-cols-3 gap-2">
+          {periodTotals.map(({ period, remaining, count }) => (
+            <div key={period} className="rounded-lg bg-slate-50 p-2">
+              <div className="text-[11px] text-slate-500">{period === "daily" ? "Today" : period === "weekly" ? "This week" : "This month"}</div>
+              <div className={`text-sm font-bold ${remaining < 0 ? "text-red-500" : "text-emerald-600"}`}>{count ? formatCurrency(remaining) : "—"}</div>
+            </div>
+          ))}
+        </div>}
         {s.budget_progress.length === 0 && (
           <p className="text-slate-500">No budgets set — ask the assistant to “suggest a budget”.</p>
         )}
         {s.budget_progress.map((b) => {
-          const open = openBudgets.has(b.category);
-          const merchants = open ? merchantsFor(b.category) : [];
+          const budgetKey = `${b.category}:${b.period}`;
+          const open = openBudgets.has(budgetKey);
+          const merchants = open ? merchantsFor(b) : [];
           // Linked reimbursements shown as credits so the breakdown reconciles with
           // the reduced "spent" the backend already reflects.
-          const reimbursements = open ? reimbursementsForCategory(monthTxns, b.category) : [];
+          const reimbursements = open ? reimbursementsForCategory(transactionsForBudget(b), b.category) : [];
           return (
-            <div key={b.category} className="mb-3">
+            <div key={budgetKey} className="mb-3">
               <button
-                onClick={() => toggleBudget(b.category)}
-                title="See this month's spending in this budget"
+                onClick={() => toggleBudget(budgetKey)}
+                title={`See spending in this ${b.period} budget`}
                 className="w-full flex items-center justify-between gap-2 text-sm mb-1 text-left"
               >
                 <span className="flex items-center gap-1.5 min-w-0">
                   <span className="text-slate-400 w-3 shrink-0">{open ? "▾" : "▸"}</span>
-                  <span className="truncate">{prettifyCategory(b.category)}</span>
+                  <span className="truncate">{prettifyCategory(b.category)} <span className="text-xs capitalize text-slate-400">· {b.period}</span></span>
                 </span>
                 <span className="text-slate-500 shrink-0">
                   <span className={`font-medium ${b.remaining < 0 ? "text-red-500" : "text-emerald-600"}`}>
@@ -161,7 +194,7 @@ export default function FinanceOverview() {
               {open && (
                 <div className="mt-1.5 ml-1 border-l-2 border-slate-100 pl-3">
                   {merchants.length === 0 && reimbursements.length === 0 && (
-                    <p className="text-xs text-slate-400 py-0.5">No spending here yet this month.</p>
+                    <p className="text-xs text-slate-400 py-0.5">No spending in this budget window.</p>
                   )}
                   {merchants.map((m) => (
                     <div key={m.name} className="flex justify-between gap-2 text-xs text-slate-600 py-0.5">
@@ -177,7 +210,14 @@ export default function FinanceOverview() {
                   ))}
                   {reimbursements.map((r) => (
                     <div key={`r${r.id}`} className="flex justify-between gap-2 text-xs text-emerald-700 py-0.5">
-                      <span className="truncate">↩ {r.merchant_name ?? r.name}</span>
+                      <span className="min-w-0">
+                        <span className="block truncate">↩ {r.merchant_name ?? r.name}</span>
+                        {r.reimburses_transaction_id == null && (
+                          <span className="block truncate text-[11px] text-slate-400">
+                            Applied to {prettifyCategory(b.category)}
+                          </span>
+                        )}
+                      </span>
                       <span className="shrink-0">
                         <span className="text-slate-400">{shortDate(r.date)}</span>
                         {" · "}{formatCurrency(r.amount)}

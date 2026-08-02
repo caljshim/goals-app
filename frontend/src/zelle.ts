@@ -36,16 +36,8 @@ export function candidateExpenses(txns: Transaction[], query = ""): Transaction[
 // credit inside a budget's breakdown. Covers both a reimbursement linked to an expense
 // of that category and one assigned to the category directly. Newest first.
 export function reimbursementsForCategory(txns: Transaction[], category: string): Transaction[] {
-  const byId = new Map(txns.map((t) => [t.id, t]));
   return txns
-    .filter((t) => {
-      if (t.reimburses_transaction_id != null) {
-        const target = byId.get(t.reimburses_transaction_id);
-        return !!target && target.amount >= 0 && target.effective_category === category;
-      }
-      // category-only: an incoming Zelle assigned straight to this category
-      return isIncomingZelle(t) && t.effective_category === category;
-    })
+    .filter((t) => t.reimbursement_category === category)
     .sort((a, b) => b.date.localeCompare(a.date));
 }
 

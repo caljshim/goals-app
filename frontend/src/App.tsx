@@ -6,8 +6,9 @@ import Portfolio from "./components/Portfolio";
 import Dashboard from "./pages/Dashboard";
 import Finances from "./pages/Finances";
 import Goals from "./pages/Goals";
+import Schedule from "./pages/Schedule";
 
-const TABS = ["Dashboard", "Finances", "Goals", "Invest"] as const;
+const TABS = ["Dashboard", "Finances", "Goals", "Schedule", "Invest"] as const;
 type Tab = (typeof TABS)[number];
 
 const SYNC_INTERVAL_MS = 15 * 60 * 1000;
@@ -17,6 +18,7 @@ export default function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [refreshNotice, setRefreshNotice] = useState<string | null>(null);
 
   // On-demand: ask Plaid to re-pull the bank NOW (e.g. payday), then ingest.
   // Plaid fetches asynchronously, so wait a beat before syncing; the 15-min
@@ -25,21 +27,35 @@ export default function App() {
     if (refreshing) return;
     setRefreshing(true);
     setRefreshError(null);
+    setRefreshNotice(null);
     try {
-      await api.refreshBank();
-      await new Promise((r) => setTimeout(r, 8000));
+      const result = await api.refreshBank();
+      if (result.accepted > 0) await new Promise((r) => setTimeout(r, 8000));
+      if (result.temporarily_unavailable > 0) {
+        setRefreshNotice(
+          result.temporarily_unavailable === result.requested
+            ? "Your bank is temporarily unavailable. Showing the latest available data."
+            : "One bank is temporarily unavailable. Showing its latest available data.",
+        );
+      }
+    } catch (e) {
+      const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      setRefreshError(typeof detail === "string" ? detail : "Bank refresh failed. Showing the latest available data.");
+    }
+
+    try {
       await api.sync();
       setRefreshKey((k) => k + 1);
     } catch (e) {
       const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-      setRefreshError(typeof detail === "string" ? detail : "Refresh failed. Please try again.");
+      setRefreshError(typeof detail === "string" ? detail : "Couldn’t load the latest available bank data.");
     } finally {
       setRefreshing(false);
     }
   };
 
-  // Pull fresh bank data on open and every 15 min (banks only post a few times a
-  // day, so faster polling buys nothing). Only remount pages when something changed.
+  // On open and every 15 minutes, ingest updates Plaid already fetched in the
+  // background. A direct institution refresh is reserved for explicit user action.
   useEffect(() => {
     let cancelled = false;
     const doSync = async () => {
@@ -61,6 +77,7 @@ export default function App() {
         <h1 className="text-2xl font-bold">💰 Money</h1>
         <div className="flex items-center gap-2">
           {refreshError && <span className="text-xs text-red-600">{refreshError}</span>}
+          {refreshNotice && <span className="text-xs text-amber-700">{refreshNotice}</span>}
           <button
             onClick={refreshNow}
             disabled={refreshing}
@@ -91,6 +108,7 @@ export default function App() {
             {tab === "Dashboard" && <Dashboard />}
             {tab === "Finances" && <Finances />}
             {tab === "Goals" && <Goals />}
+            {tab === "Schedule" && <Schedule />}
             {tab === "Invest" && <Portfolio />}
           </div>
         </div>

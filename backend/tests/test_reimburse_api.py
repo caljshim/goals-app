@@ -32,10 +32,62 @@ def test_link_and_unlink_reimbursement(client, session):
     resp = client.patch(f"/api/transactions/{zelle.id}/reimburses", json={"target_id": dinner.id})
     assert resp.status_code == 200
     assert resp.json()["reimburses_transaction_id"] == dinner.id
+    assert resp.json()["reimbursement_category"] == "FOOD_AND_DRINK"
 
     resp = client.patch(f"/api/transactions/{zelle.id}/reimburses", json={"target_id": None})
     assert resp.status_code == 200
     assert resp.json()["reimburses_transaction_id"] is None
+
+
+def test_category_only_reimbursement_exposes_linkage(client, session):
+    acc = _seed_account(session)
+    zelle = _mk(
+        session, acc, date=date(2026, 7, 2), name="Zelle from Ryan",
+        amount=-60.0, category="TRANSFER_IN", user_category="GROCERIES",
+    )
+    row = next(row for row in client.get("/api/transactions").json() if row["id"] == zelle.id)
+    assert row["reimburses_transaction_id"] is None
+    assert row["reimbursement_category"] == "GROCERIES"
+
+
+def test_bulk_category_update_is_atomic_and_marks_category_reimbursements(client, session):
+    acc = _seed_account(session)
+    first = _mk(session, acc, date=date(2026, 7, 2), name="Zelle from A", amount=-20.0, category="TRANSFER_IN")
+    second = _mk(session, acc, date=date(2026, 7, 3), name="Zelle from B", amount=-30.0, category="TRANSFER_IN")
+
+    response = client.patch("/api/transactions/bulk-category", json={
+        "transaction_ids": [first.id, second.id],
+        "user_category": "Food And Drink",
+    })
+
+    assert response.status_code == 200
+    assert [row["id"] for row in response.json()] == [first.id, second.id]
+    assert {row["effective_category"] for row in response.json()} == {"FOOD_AND_DRINK"}
+    assert {row["reimbursement_category"] for row in response.json()} == {"FOOD_AND_DRINK"}
+
+    failed = client.patch("/api/transactions/bulk-category", json={
+        "transaction_ids": [first.id, 9999],
+        "user_category": "GROCERIES",
+    })
+    assert failed.status_code == 404
+    session.refresh(first)
+    assert first.user_category == "FOOD_AND_DRINK"
+
+
+def test_bulk_link_reimbursements_to_one_expense(client, session):
+    acc = _seed_account(session)
+    dinner = _mk(session, acc, date=date(2026, 7, 1), name="Dinner", amount=180.0, category="FOOD_AND_DRINK")
+    first = _mk(session, acc, date=date(2026, 7, 2), name="Zelle from A", amount=-20.0, category="TRANSFER_IN")
+    second = _mk(session, acc, date=date(2026, 7, 3), name="Zelle from B", amount=-30.0, category="TRANSFER_IN")
+
+    response = client.patch("/api/transactions/bulk-reimburses", json={
+        "transaction_ids": [first.id, second.id],
+        "target_id": dinner.id,
+    })
+
+    assert response.status_code == 200
+    assert {row["reimburses_transaction_id"] for row in response.json()} == {dinner.id}
+    assert {row["reimbursement_category"] for row in response.json()} == {"FOOD_AND_DRINK"}
 
 
 def test_link_rejects_missing_source(client, session):

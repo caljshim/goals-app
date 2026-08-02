@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { branchConversation, type CopilotMessage } from "../copilotConversation";
 import { applyDashboardUiActions, type DashboardUiAction } from "../dashboardConfig";
-import type { ChatMessage } from "../types";
-
-type Msg = ChatMessage & { actions?: string[] };
+import { parseCopilotContent, parseInlineMarkdown } from "../inlineMarkdown";
+import type { MediaAsset } from "../types";
 
 const STARTERS = [
   "How am I doing this month?",
@@ -12,45 +12,130 @@ const STARTERS = [
 ];
 
 export default function CopilotChat({ onApplied }: { onApplied?: () => void }) {
-  const [messages, setMessages] = useState<Msg[]>([]);
+  const [messages, setMessages] = useState<CopilotMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const endRef = useRef<HTMLDivElement>(null);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<MediaAsset[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const conversationRef = useRef<HTMLDivElement>(null);
+  const conversationBottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, busy]);
+  const newId = () => crypto.randomUUID();
 
-  const send = async (text: string) => {
-    const content = text.trim();
-    if (!content || busy) return;
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      conversationBottomRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [messages, busy]);
+
+  const requestReply = async (history: CopilotMessage[]) => {
     setError(null);
-    const history: Msg[] = [...messages, { role: "user", content }];
     setMessages(history);
-    setInput("");
     setBusy(true);
     try {
-      const res = await api.chat(history.map((m) => ({ role: m.role, content: m.content })));
-      setMessages([...history, { role: "assistant", content: res.reply || "(no reply)", actions: res.actions }]);
+      const res = await api.chat(history.map((m) => ({
+        role: m.role,
+        content: m.content,
+        attachment_ids: m.attachment_ids,
+      })));
+      setMessages([
+        ...history,
+        { id: newId(), role: "assistant", content: res.reply || "(no reply)", actions: res.actions },
+      ]);
       if (res.ui_actions?.length) applyDashboardUiActions(res.ui_actions as DashboardUiAction[]);
       if (res.refresh) onApplied?.();
     } catch (e) {
       const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-      setError(typeof detail === "string" ? detail : "Copilot request failed. Please try again.");
+      setError(typeof detail === "string" ? detail : "Audel couldn't respond. Please try again.");
       setMessages(history); // keep the user's message; drop the pending assistant turn
     } finally {
       setBusy(false);
     }
   };
 
+  const send = (text: string) => {
+    const content = text.trim();
+    if ((!content && attachments.length === 0) || busy || uploading) return;
+
+    const history = editingMessageId
+      ? branchConversation(messages, editingMessageId, content, newId())
+      : [...messages, {
+          id: newId(),
+          role: "user" as const,
+          content,
+          attachment_ids: attachments.map((asset) => asset.id),
+        }];
+    if (!history) return;
+
+    setInput("");
+    setAttachments([]);
+    setEditingMessageId(null);
+    void requestReply(history);
+  };
+
+  const beginEditing = (message: CopilotMessage) => {
+    if (busy) return;
+    setAttachments([]);
+    setEditingMessageId(message.id);
+    setInput(message.content);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
+  const cancelEditing = () => {
+    setEditingMessageId(null);
+    setInput("");
+  };
+
+  const uploadFiles = async (files: FileList | null) => {
+    if (!files?.length || busy || uploading) return;
+    const remaining = Math.max(0, 4 - attachments.length);
+    const selected = Array.from(files).slice(0, remaining);
+    if (!selected.length) return;
+    setError(null);
+    setUploading(true);
+    try {
+      const uploaded: MediaAsset[] = [];
+      for (const file of selected) {
+        uploaded.push(await api.uploadImage(file));
+      }
+      setAttachments((current) => [...current, ...uploaded].slice(0, 4));
+    } catch (e) {
+      const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      setError(typeof detail === "string" ? detail : "The image could not be uploaded.");
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const removeAttachment = (asset: MediaAsset) => {
+    setAttachments((current) => current.filter((item) => item.id !== asset.id));
+    void api.deleteImage(asset.id).catch(() => undefined);
+  };
+
+  const resend = (message: CopilotMessage) => {
+    if (busy) return;
+    const history = branchConversation(messages, message.id, undefined, newId());
+    if (!history) return;
+    cancelEditing();
+    void requestReply(history);
+  };
+
   return (
     <div className="flex flex-col bg-white rounded-xl border border-slate-200 lg:h-[calc(100vh-8rem)]">
-      <div className="px-4 py-3 border-b border-slate-200 font-semibold">✨ Copilot</div>
+      <div className="px-4 py-3 border-b border-slate-200 font-semibold">✨ Audel</div>
 
-      <div className="flex-1 overflow-y-auto p-3 space-y-3 min-h-[16rem]">
+      <div ref={conversationRef} onTouchMove={() => inputRef.current?.blur()}
+        className="flex-1 overflow-y-auto p-3 space-y-3 min-h-[16rem]">
         {messages.length === 0 && (
           <div className="text-sm text-slate-500">
             <p className="mb-2">
-              Ask about your budgets, spending, portfolio, or where to invest. I coordinate a
+              Ask Audel about your budgets, spending, portfolio, or where to invest. Audel coordinates a
               budgeting specialist and an education-first investing specialist — and I can’t place trades.
             </p>
             <div className="flex flex-wrap gap-1.5">
@@ -64,12 +149,17 @@ export default function CopilotChat({ onApplied }: { onApplied?: () => void }) {
           </div>
         )}
 
-        {messages.map((m, i) => (
-          <div key={i} className={m.role === "user" ? "text-right" : "text-left"}>
+        {messages.map((m) => (
+          <div key={m.id} className={m.role === "user" ? "text-right" : "text-left"}>
             <div className={`inline-block max-w-[85%] rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap ${
               m.role === "user" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-800"
             }`}>
-              {m.content}
+              {!!m.attachment_ids?.length && (
+                <div className="mb-1 text-xs opacity-75">
+                  📎 {m.attachment_ids.length} image{m.attachment_ids.length === 1 ? "" : "s"}
+                </div>
+              )}
+              <CopilotMarkdownText content={m.content} />
             </div>
             {m.actions && m.actions.length > 0 && (
               <ul className="mt-1 space-y-0.5">
@@ -78,11 +168,23 @@ export default function CopilotChat({ onApplied }: { onApplied?: () => void }) {
                 ))}
               </ul>
             )}
+            {m.role === "user" && (
+              <div className="mt-1 flex justify-end gap-3 text-xs text-slate-500">
+                <button type="button" onClick={() => beginEditing(m)} disabled={busy}
+                  className="hover:text-slate-900 disabled:opacity-40" aria-label="Edit and resend prompt">
+                  ✎ Edit
+                </button>
+                <button type="button" onClick={() => resend(m)} disabled={busy}
+                  className="hover:text-slate-900 disabled:opacity-40" aria-label="Resend prompt">
+                  ↻ Resend
+                </button>
+              </div>
+            )}
           </div>
         ))}
 
         {busy && <div className="text-sm text-slate-400">Thinking…</div>}
-        <div ref={endRef} />
+        <div ref={conversationBottomRef} aria-hidden="true" />
       </div>
 
       {error && (
@@ -92,15 +194,93 @@ export default function CopilotChat({ onApplied }: { onApplied?: () => void }) {
       )}
 
       <form onSubmit={(e) => { e.preventDefault(); send(input); }}
-        className="flex gap-2 p-3 border-t border-slate-200">
-        <input value={input} onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask about your money…" disabled={busy}
-          className="flex-1 border rounded-lg px-3 py-2 text-sm" />
-        <button disabled={busy || !input.trim()}
-          className="px-3 py-2 rounded-lg bg-slate-900 text-white text-sm disabled:opacity-50">
-          Send
-        </button>
+        className="p-3 border-t border-slate-200">
+        {attachments.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {attachments.map((asset) => (
+              <span key={asset.id}
+                className="inline-flex items-center gap-1 rounded-full border border-slate-300 bg-slate-50 px-2 py-1 text-xs text-slate-700">
+                📎 {asset.filename}
+                <button type="button" onClick={() => removeAttachment(asset)}
+                  className="font-semibold text-slate-500 hover:text-slate-900"
+                  aria-label={`Remove ${asset.filename}`}>×</button>
+              </span>
+            ))}
+          </div>
+        )}
+        {editingMessageId && (
+          <div className="mb-2 flex items-center justify-between text-xs text-slate-500">
+            <span>✎ Editing prompt</span>
+            <button type="button" onClick={cancelEditing} className="font-medium hover:text-slate-900">
+              Cancel
+            </button>
+          </div>
+        )}
+        <div className="flex gap-2">
+          <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/gif,image/webp"
+            multiple className="hidden" onChange={(event) => void uploadFiles(event.target.files)} />
+          <button type="button" onClick={() => fileInputRef.current?.click()}
+            disabled={busy || uploading || editingMessageId !== null || attachments.length >= 4}
+            className="rounded-lg border px-3 py-2 text-sm disabled:opacity-50"
+            aria-label="Attach images">
+            {uploading ? "…" : "＋ Photo"}
+          </button>
+          <input ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)}
+            placeholder="Ask Audel anything or attach a photo…" disabled={busy}
+            className="flex-1 border rounded-lg px-3 py-2 text-sm" />
+          <button disabled={busy || uploading || (!input.trim() && attachments.length === 0)}
+            className="px-3 py-2 rounded-lg bg-slate-900 text-white text-sm disabled:opacity-50">
+            {editingMessageId ? "Save & resend" : "Send"}
+          </button>
+        </div>
       </form>
+    </div>
+  );
+}
+
+function CopilotMarkdownText({ content }: { content: string }) {
+  return (
+    <div className="space-y-2 text-left">
+      {parseCopilotContent(content).map((block, index) => (
+        block.type === "text"
+          ? <div key={index}><CopilotInlineMarkdownText content={block.content} /></div>
+          : <CopilotTableCards key={index} headers={block.headers} rows={block.rows} />
+      ))}
+    </div>
+  );
+}
+
+function CopilotInlineMarkdownText({ content }: { content: string }) {
+  return parseInlineMarkdown(content).map((segment, index) => {
+    if (segment.style === "bold") return <strong key={index}>{segment.text}</strong>;
+    if (segment.style === "italic") return <em key={index}>{segment.text}</em>;
+    if (segment.style === "boldItalic") {
+      return <strong key={index}><em>{segment.text}</em></strong>;
+    }
+    return <span key={index}>{segment.text}</span>;
+  });
+}
+
+function CopilotTableCards({ headers, rows }: { headers: string[]; rows: string[][] }) {
+  return (
+    <div className="space-y-2" aria-label="Comparison table">
+      {rows.map((row, rowIndex) => (
+        <div key={rowIndex} className="rounded-xl border border-current/20 bg-black/5 p-2.5">
+          <div className="font-semibold">
+            <CopilotInlineMarkdownText content={row[0]} />
+          </div>
+          <dl className="mt-1.5 space-y-1">
+            {headers.slice(1).map((header, columnIndex) => (
+              <div key={header} className="flex items-start justify-between gap-4">
+                <dt className="text-xs opacity-60">{header}</dt>
+                <dd className="text-right text-xs font-medium">
+                  <CopilotInlineMarkdownText content={row[columnIndex + 1]} />
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      ))}
     </div>
   );
 }

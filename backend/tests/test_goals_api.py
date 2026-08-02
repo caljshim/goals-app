@@ -1,6 +1,6 @@
 from datetime import date, datetime, timedelta
 
-from app.budget.models import Account, Goal, PlaidItem
+from app.budget.models import Account, Goal, GoalCheckin, PlaidItem
 
 
 def _account(session, **kw):
@@ -11,6 +11,24 @@ def _account(session, **kw):
     d.update(kw)
     a = Account(**d); session.add(a); session.commit(); session.refresh(a)
     return a
+
+
+def test_routine_goal_important_round_trips(client, session):
+    created = client.post("/api/goals", json={
+        "name": "Meds", "kind": "numeric", "target": 1, "period": "daily",
+        "reminder_time": "08:00", "important": True,
+    })
+    assert created.status_code == 201
+    goal = created.json()
+    assert goal["important"] is True
+    assert client.get("/api/goals").json()[0]["important"] is True
+    updated = client.patch(f"/api/goals/{goal['id']}", json={"important": False})
+    assert updated.status_code == 200 and updated.json()["important"] is False
+
+
+def test_goal_defaults_to_not_important(client, session):
+    created = client.post("/api/goals", json={"name": "Trip", "kind": "save", "target": 2000})
+    assert created.status_code == 201 and created.json()["important"] is False
 
 
 def test_create_and_list_goal(client, session):
@@ -33,12 +51,70 @@ def test_create_validation_is_400(client, session):
     assert resp.status_code == 400
 
 
+def test_progress_negative_add_clamps_at_zero(client, session):
+    gid = client.post("/api/goals", json={"name": "Reps", "kind": "numeric", "target": 100, "current": 10}).json()["id"]
+    r = client.patch(f"/api/goals/{gid}/progress", json={"add": -4})
+    assert r.status_code == 200 and r.json()["current_value"] == 6.0
+    r = client.patch(f"/api/goals/{gid}/progress", json={"add": -50})
+    assert r.status_code == 200 and r.json()["current_value"] == 0.0
+    # Explicit sets are not clamped — negative values stay representable.
+    r = client.patch(f"/api/goals/{gid}/progress", json={"current": -5})
+    assert r.status_code == 200 and r.json()["current_value"] == -5.0
+
+
+def test_update_goal_step(client, session):
+    gid = client.post("/api/goals", json={"name": "Pushups", "kind": "numeric", "target": 100, "step": 1}).json()["id"]
+    r = client.patch(f"/api/goals/{gid}", json={"step": 5})
+    assert r.status_code == 200 and r.json()["step"] == 5.0
+    assert client.get("/api/goals").json()[0]["step"] == 5.0
+    assert client.patch(f"/api/goals/{gid}", json={"step": 0}).status_code == 400
+    assert client.patch(f"/api/goals/{gid}", json={"step": -3}).status_code == 400
+
+
 def test_progress_add_then_delete(client, session):
     gid = client.post("/api/goals", json={"name": "Trip", "kind": "save", "target": 2000, "current": 900}).json()["id"]
     r = client.patch(f"/api/goals/{gid}/progress", json={"add": 200})
     assert r.status_code == 200 and r.json()["current_value"] == 1100.0
     assert client.delete(f"/api/goals/{gid}").status_code == 204
     assert client.get("/api/goals").json() == []
+    archived = client.get("/api/goals", params={"archived": True}).json()
+    assert len(archived) == 1 and archived[0]["id"] == gid
+    assert archived[0]["archived_at"] is not None
+
+
+def test_rename_and_end_goal_group_are_atomic_and_preserve_history(client, session):
+    first = client.post("/api/goals", json={
+        "name": "Bench", "kind": "numeric", "target": 225, "current": 185, "group": "Lifts",
+    }).json()
+    second = client.post("/api/goals", json={
+        "name": "Squat", "kind": "numeric", "target": 315, "current": 275, "group": "Lifts",
+    }).json()
+    ids = [first["id"], second["id"]]
+    client.patch(f"/api/goals/{first['id']}/progress", json={"add": 5})
+
+    renamed = client.patch("/api/goal-groups", json={"goal_ids": ids, "name": "Big Three"})
+    assert renamed.status_code == 200
+    assert {goal["group"] for goal in renamed.json()} == {"Big Three"}
+
+    ended = client.post("/api/goal-groups/end", json={"goal_ids": ids})
+    assert ended.status_code == 200
+    assert ended.json() == ids
+    assert client.get("/api/goals").json() == []
+    archived = client.get("/api/goals", params={"archived": True}).json()
+    archived_by_id = {goal["id"]: goal for goal in archived}
+    assert archived_by_id[first["id"]]["history"]
+    assert archived_by_id[first["id"]]["group"] == "Big Three"
+
+
+def test_goal_group_action_rejects_stale_ids_without_partial_update(client, session):
+    goal = client.post("/api/goals", json={
+        "name": "Bench", "kind": "numeric", "target": 225, "group": "Lifts",
+    }).json()
+    response = client.patch("/api/goal-groups", json={
+        "goal_ids": [goal["id"], 99999], "name": "Renamed",
+    })
+    assert response.status_code == 400
+    assert client.get("/api/goals").json()[0]["group"] == "Lifts"
 
 
 def test_reset_streak_restarts_today(client, session):
@@ -53,11 +129,11 @@ def test_update_goal_target(client, session):
     assert r.json()["target"] == 2500.0 and r.json()["pct"] == 36.0
 
 
-def test_create_weekly_spend_cap_round_trips_period(client, session):
+def test_create_weekly_spend_cap_redirects_to_budgets(client, session):
     resp = client.post("/api/goals", json={"name": "Eat wk", "kind": "spend_cap",
                                             "target": 100, "category": "EATING_OUT", "period": "weekly"})
-    assert resp.status_code == 201
-    assert resp.json()["period"] == "weekly"
+    assert resp.status_code == 400
+    assert "Budgets" in resp.json()["detail"]
 
 
 def test_weekly_goal_round_trips_preferred_day(client, session):
@@ -90,6 +166,70 @@ def test_weekly_goal_supports_multiple_reminder_days(client, session):
     assert updated.json()["weekly_days"] == ["tuesday", "thursday"]
 
 
+def test_routine_reminder_time_round_trips_and_is_in_tasks(client):
+    weekday = date.today().strftime("%A").lower()
+    created = client.post("/api/goals", json={
+        "name": "Church", "kind": "numeric", "target": 1, "period": "weekly",
+        "weekly_days": [weekday], "reminder_time": "9:05",
+    })
+    assert created.status_code == 201
+    assert created.json()["reminder_time"] == "09:05"
+
+    tasks = client.get("/api/goal-tasks", params={"scope": "week"}).json()
+    occurrence = next(task for task in tasks if task["goal_id"] == created.json()["id"])
+    assert occurrence["reminder_time"] == "09:05"
+
+    updated = client.patch(f"/api/goals/{created.json()['id']}", json={"reminder_time": "18:30"})
+    assert updated.status_code == 200
+    assert updated.json()["reminder_time"] == "18:30"
+
+
+def test_routine_reminder_time_rejects_invalid_values(client):
+    response = client.post("/api/goals", json={
+        "name": "Church", "kind": "numeric", "target": 1, "period": "weekly",
+        "weekly_days": ["sunday"], "reminder_time": "25:99",
+    })
+    assert response.status_code == 400
+
+
+def test_persistent_daily_routine_defaults_to_hourly_nudges(client):
+    created = client.post("/api/goals", json={
+        "name": "Take vitamins", "kind": "numeric", "target": 1, "period": "daily",
+        "reminder_time": "09:00", "repeat_until_completed": True,
+    })
+    assert created.status_code == 201
+    assert created.json()["repeat_until_completed"] is True
+    assert created.json()["nudge_interval_minutes"] == 60
+
+    updated = client.patch(f"/api/goals/{created.json()['id']}", json={
+        "repeat_until_completed": False,
+    })
+    assert updated.status_code == 200
+    assert updated.json()["repeat_until_completed"] is False
+    assert updated.json()["nudge_interval_minutes"] is None
+
+
+def test_persistent_routine_requires_recurring_cadence_time_and_safe_interval(client):
+    no_time = client.post("/api/goals", json={
+        "name": "Take vitamins", "kind": "numeric", "target": 1, "period": "daily",
+        "repeat_until_completed": True,
+    })
+    assert no_time.status_code == 400
+
+    one_time = client.post("/api/goals", json={
+        "name": "Take vitamins", "kind": "numeric", "target": 1, "period": "once",
+        "reminder_time": "09:00", "repeat_until_completed": True,
+    })
+    assert one_time.status_code == 400
+
+    too_frequent = client.post("/api/goals", json={
+        "name": "Take vitamins", "kind": "numeric", "target": 1, "period": "daily",
+        "reminder_time": "09:00", "repeat_until_completed": True,
+        "nudge_interval_minutes": 5,
+    })
+    assert too_frequent.status_code == 400
+
+
 def test_missed_goal_task_is_locked_without_manual_override(client, session):
     yesterday = date.today() - timedelta(days=1)
     weekday = yesterday.strftime("%A").lower()
@@ -113,20 +253,106 @@ def test_missed_goal_task_is_locked_without_manual_override(client, session):
     assert corrected.status_code == 200
     assert corrected.json()["completed"] is True
 
+    # Once completed, `missed` is false. An accidental check must still be
+    # reversible without depending on that transient flag.
+    unchecked = client.patch(f"/api/goals/{goal.id}/checkin",
+                             json={"scheduled_for": yesterday.isoformat(), "completed": False})
+    assert unchecked.status_code == 200
+    assert unchecked.json()["completed"] is False
 
-def test_week_view_includes_next_schedule_when_goal_created_near_week_end(client, session):
-    current_week_start = date.today() - timedelta(days=(date.today().weekday() + 1) % 7)
-    next_monday = current_week_start + timedelta(days=8)
-    created = client.post("/api/goals", json={"name": "Retinol", "kind": "numeric",
-                                                "target": 3, "period": "weekly",
-                                                "weekly_days": ["monday", "wednesday", "friday"]}).json()
-    goal = session.get(Goal, created["id"])
-    goal.created_at = datetime.combine(date.today() + timedelta(days=1), datetime.min.time())
+
+class _FrozenWednesday(date):
+    @classmethod
+    def today(cls):
+        return date(2026, 7, 22)  # a Wednesday; the week runs Sun 7/19 – Sat 7/25
+
+
+def test_weekly_streak_counts_consecutive_completed_weeks(client, session, monkeypatch):
+    from app.budget.services import goals as goals_svc
+    monkeypatch.setattr(goals_svc, "date", _FrozenWednesday)
+
+    made = client.post("/api/goals", json={
+        "name": "Church", "kind": "numeric", "target": 1,
+        "period": "weekly", "weekly_days": ["wednesday"],
+    }).json()
+    goal = session.get(Goal, made["id"])
+    goal.created_at = datetime(2026, 6, 1)
+    session.add(goal)
+    for scheduled in (date(2026, 7, 22), date(2026, 7, 15), date(2026, 7, 8)):
+        session.add(GoalCheckin(goal_id=goal.id, scheduled_for=scheduled))
+    session.commit()
+
+    assert client.get("/api/goals").json()[0]["weekly_streak"] == 3
+
+
+def test_in_progress_week_does_not_break_weekly_streak(client, session, monkeypatch):
+    from app.budget.services import goals as goals_svc
+    monkeypatch.setattr(goals_svc, "date", _FrozenWednesday)
+
+    made = client.post("/api/goals", json={
+        "name": "Retinol", "kind": "numeric", "target": 2,
+        "period": "weekly", "weekly_days": ["monday", "friday"],
+    }).json()
+    goal = session.get(Goal, made["id"])
+    goal.created_at = datetime(2026, 6, 1)
+    session.add(goal)
+    for scheduled in (
+        date(2026, 7, 13), date(2026, 7, 17),
+        date(2026, 7, 6), date(2026, 7, 10),
+    ):
+        session.add(GoalCheckin(goal_id=goal.id, scheduled_for=scheduled))
+    session.commit()
+
+    # Friday 7/24 is not due yet, so the unfinished active week is ignored.
+    assert client.get("/api/goals").json()[0]["weekly_streak"] == 2
+
+
+def test_week_view_keeps_each_selected_day_visible_for_new_routine(client, session, monkeypatch):
+    from app.budget.services import goals as goals_svc
+    monkeypatch.setattr(goals_svc, "date", _FrozenWednesday)
+
+    made = client.post("/api/goals", json={"name": "Retinol", "kind": "numeric", "target": 3,
+                                           "period": "weekly", "weekly_days": ["monday", "friday"]}).json()
+    goal = session.get(Goal, made["id"])
+    goal.created_at = datetime(2026, 7, 21)  # Tuesday, after this week's Monday
     session.add(goal); session.commit()
 
-    tasks = client.get("/api/goal-tasks", params={"scope": "week"}).json()
-    retinol_dates = [task["scheduled_for"] for task in tasks if task["goal_id"] == goal.id]
-    assert next_monday.isoformat() in retinol_dates
+    dates = [task["scheduled_for"] for task in client.get("/api/goal-tasks", params={"scope": "week"}).json()
+             if task["goal_id"] == goal.id]
+    assert dates == ["2026-07-24", "2026-07-27"]
+
+
+def test_week_view_falls_back_to_next_week_when_created_after_last_scheduled_day(client, session, monkeypatch):
+    from app.budget.services import goals as goals_svc
+    monkeypatch.setattr(goals_svc, "date", _FrozenWednesday)
+
+    made = client.post("/api/goals", json={"name": "Retinol", "kind": "numeric", "target": 3,
+                                           "period": "weekly", "weekly_days": ["monday"]}).json()
+    goal = session.get(Goal, made["id"])
+    goal.created_at = datetime(2026, 7, 21)  # Tuesday, after this week's only scheduled day
+    session.add(goal); session.commit()
+
+    dates = [task["scheduled_for"] for task in client.get("/api/goal-tasks", params={"scope": "week"}).json()
+             if task["goal_id"] == goal.id]
+    assert dates == ["2026-07-27"]  # next Monday, so the checklist isn't empty
+
+
+def test_week_view_uses_the_configured_week_boundary(client, session, monkeypatch):
+    from app.budget.services import goals as goals_svc
+    monkeypatch.setattr(goals_svc, "date", _FrozenWednesday)
+
+    made = client.post("/api/goals", json={
+        "name": "Weekend routine", "kind": "numeric", "target": 2,
+        "period": "weekly", "weekly_days": ["friday", "sunday"],
+        "weekly_reset_day": "friday",
+    }).json()
+    goal = session.get(Goal, made["id"])
+    goal.created_at = datetime(2026, 7, 1)
+    session.add(goal); session.commit()
+
+    dates = [task["scheduled_for"] for task in client.get("/api/goal-tasks", params={"scope": "week"}).json()
+             if task["goal_id"] == goal.id]
+    assert dates == ["2026-07-10", "2026-07-12", "2026-07-17", "2026-07-19"]
 
 
 def test_custom_reset_settings_and_interval_round_trip(client, session):
@@ -155,10 +381,42 @@ def test_spend_cap_rejects_once_period(client, session):
 
 
 def test_numeric_under_goal_round_trips(client, session):
-    resp = client.post("/api/goals", json={"name": "Subs", "kind": "numeric",
-                                           "target": 100, "current": 80, "direction": "under"})
+    resp = client.post("/api/goals", json={"name": "Weight", "kind": "numeric",
+                                           "target": 180, "current": 200, "direction": "under"})
     assert resp.status_code == 201
-    assert resp.json()["direction"] == "under" and resp.json()["status"] == "under"
+    assert resp.json()["direction"] == "under" and resp.json()["anchor_value"] == 200
+    assert resp.json()["status"] == "active" and resp.json()["pct"] == 0
+    updated = client.patch(f"/api/goals/{resp.json()['id']}/progress", json={"current": 190})
+    assert updated.json()["pct"] == 50.0
+
+
+def test_flexible_financial_goal_round_trips(client, session):
+    account = _account(session, current_balance=2500.0)
+    response = client.post("/api/goals", json={
+        "name": "Emergency fund", "kind": "financial",
+        "financial_metric": "account_balance", "financial_rule": "reach",
+        "target": 5000, "account_ids": [account.id],
+    })
+    assert response.status_code == 201
+    goal = response.json()
+    assert goal["financial_metric"] == "account_balance"
+    assert goal["account_ids"] == [account.id]
+    assert goal["current_value"] == 2500 and goal["pct"] == 50
+
+
+def test_manual_financial_goal_round_trips_without_an_account(client, session):
+    response = client.post("/api/goals", json={
+        "name": "Vacation fund", "kind": "financial", "financial_source": "manual",
+        "financial_metric": "account_balance", "financial_rule": "reach",
+        "target": 2000, "current": 250, "step": 25,
+    })
+    assert response.status_code == 201
+    goal = response.json()
+    assert goal["financial_source"] == "manual" and goal["account_ids"] == []
+    assert goal["current_value"] == 250 and goal["unit"] == "$"
+
+    updated = client.patch(f"/api/goals/{goal['id']}/progress", json={"add": 25})
+    assert updated.status_code == 200 and updated.json()["current_value"] == 275
 
 
 def test_goal_step_defaults_and_round_trips(client, session):
@@ -196,3 +454,54 @@ def test_missing_goal_404(client, session):
     assert client.delete("/api/goals/999").status_code == 404
     assert client.patch("/api/goals/999", json={"target": 1}).status_code == 404
     assert client.post("/api/goals/999/reset").status_code == 404
+
+
+def test_goal_icon_color_patch_and_resolution(client, session):
+    gid = client.post("/api/goals", json={"name": "Reps", "kind": "numeric", "target": 100, "current": 10}).json()["id"]
+    # defaults before any customization
+    g = client.get("/api/goals").json()[0]
+    assert g["icon"] is None and g["color"] is None
+    assert g["resolved_icon"] == "chart" and g["resolved_color"] == "pine"
+
+    # unknown token rejected
+    assert client.patch(f"/api/goals/{gid}", json={"color": "bogus"}).status_code == 400
+
+    # set overrides
+    r = client.patch(f"/api/goals/{gid}", json={"icon": "flame", "color": "rose"})
+    assert r.status_code == 200 and r.json()["resolved_icon"] == "flame" and r.json()["resolved_color"] == "rose"
+
+    # clear color -> back to default
+    r = client.patch(f"/api/goals/{gid}", json={"color": None})
+    assert r.json()["color"] is None and r.json()["resolved_color"] == "pine"
+
+
+def test_streak_default_color_is_honey(client, session):
+    client.post("/api/goals", json={"name": "Meditate", "kind": "streak"})
+    g = client.get("/api/goals").json()[0]
+    assert g["resolved_icon"] == "flame" and g["resolved_color"] == "honey"
+
+
+def test_group_color_cascades_to_members(client, session):
+    a = client.post("/api/goals", json={"name": "A", "kind": "numeric", "target": 10, "current": 1, "group": "Trips"}).json()["id"]
+    b = client.post("/api/goals", json={"name": "B", "kind": "numeric", "target": 10, "current": 1, "group": "Trips"}).json()["id"]
+    client.put("/api/goal-groups/Trips/customization", json={"icon": "plane", "color": "sky"})
+
+    goals = {g["id"]: g for g in client.get("/api/goals").json()}
+    # cascade: neither goal set its own color -> inherits group color
+    assert goals[a]["resolved_color"] == "sky" and goals[a]["group_color"] == "sky" and goals[a]["group_icon"] == "plane"
+    # per-goal override wins over the cascade
+    client.patch(f"/api/goals/{b}", json={"color": "rose"})
+    goals = {g["id"]: g for g in client.get("/api/goals").json()}
+    assert goals[b]["resolved_color"] == "rose" and goals[b]["group_color"] == "sky"
+
+
+def test_group_settings_follow_rename_and_end(client, session):
+    a = client.post("/api/goals", json={"name": "A", "kind": "numeric", "target": 10, "current": 1, "group": "Trips"}).json()["id"]
+    client.put("/api/goal-groups/Trips/customization", json={"color": "sky"})
+    # rename Trips -> Journeys carries the settings
+    client.patch("/api/goal-groups", json={"goal_ids": [a], "name": "Journeys"})
+    assert client.get("/api/goal-groups/Journeys/customization").json()["color"] == "sky"
+    assert client.get("/api/goal-groups/Trips/customization").json()["color"] is None
+    # ending the group deletes its settings
+    client.post("/api/goal-groups/end", json={"goal_ids": [a]})
+    assert client.get("/api/goal-groups/Journeys/customization").json()["color"] is None

@@ -1,4 +1,4 @@
-"""Goals specialist: a tool-using agent over the user's goals of ANY kind — savings and
+"""Goals specialist: a tool-using agent over the user's goals of ANY kind — financial and
 spending targets, general numeric targets (including fitness/strength like bench press or
 a "1000 CLUB" total), and streaks. Delegated to by the copilot orchestrator."""
 import json
@@ -16,29 +16,41 @@ MAX_OUTPUT_TOKENS = 2048
 SYSTEM = (
     "You are the user's goals specialist embedded in their money app. You manage goals of ANY "
     "kind — not just money:\n"
-    "- save: money toward a target; optionally linked to an account (auto balance) or manual.\n"
-    "- spend_cap: keep a spending category under a cap; needs a period (daily/weekly/monthly).\n"
+    "- save: legacy savings records only. Do not create new save goals.\n"
+    "- financial: flexible money goal. Choose financial_source accounts for automatic bank tracking "
+    "or manual for user-entered progress. For accounts, choose financial_metric account_balance, "
+    "debt_balance, net_worth, income, or cash_flow; financial_rule reach, stay_under, or reduce_to; "
+    "account_ids selects sources and period scopes flow metrics. Manual goals use account_balance as the metric, "
+    "accept current and step, and do not use account_ids. ALWAYS use financial for new money goals.\n"
     "- numeric: any current→target number — USE THIS for fitness/strength (bench press, squat, a "
     "'1000 CLUB' total), net worth, AND any habit/count that repeats. direction 'reach' (default) "
-    "or 'under'.\n"
+    "or 'under'. An under goal MUST include `current`; that first value becomes its fixed starting "
+    "anchor and must be greater than the target.\n"
     "- streak: a CONTINUOUS days-since counter (days sober, days since an event). It does NOT "
     "repeat weekly/daily — use it ONLY for 'days since ...'.\n\n"
-    "CADENCE — this matters: set period (once/daily/weekly/monthly) on save/spend_cap/numeric.\n"
+    "Spending limits are budgets, not goals. Never create spend_cap or category_spend goals; tell the "
+    "orchestrator/user to use Budgets instead.\n\n"
+    "CADENCE — this matters: set period (once/daily/weekly/monthly) on numeric goals.\n"
     "- A habit or count that REPEATS and resets each period — 'go to church every week', 'work out "
     "3× a week', 'read every day' — is a NUMERIC goal with period=weekly/daily and a per-period "
-    "target (e.g. target 1, period weekly). It resets automatically each period. DO NOT use streak "
+    "target (e.g. target 1, period weekly). A simple recurring task that is either done or not done "
+    "uses target=1. It resets automatically each period. DO NOT use streak "
     "for these; streak is only continuous days-since.\n"
     "- If you (or a prior turn) created the wrong thing, fix it: update_goal can change period, or "
     "delete_goal + create_goal with the right kind/period.\n\n"
+    "ROUTINE NOTIFICATIONS: when a recurring request says to keep reminding, keep nudging, repeat "
+    "until done, or snooze, create/update the recurring numeric goal with reminder_time, "
+    "repeat_until_completed=true, and nudge_interval_minutes. Use 60 minutes when no interval is "
+    "given. This is still a routine, not a one-time reminder.\n\n"
     "Group related goals with a shared `group` name (e.g. '1000 CLUB' for the three big lifts) — the "
     "app shows a rolled-up % for the group. Manual goals hold a `current` value you change with "
     "log_progress (set current, or add a delta); `step` sizes the +/- buttons. raise_goal bumps a "
-    "reached save/numeric goal to a new target and logs the old one as a milestone.\n\n"
+    "reached legacy save, manual financial, or numeric goal to a new target and logs the old one as a milestone.\n\n"
     "Guidelines:\n"
     "- Call list_goals first when the user refers to goals that may already exist.\n"
     "- Create/update/log directly when the intent is clear, then summarize what you changed.\n"
     "- For a multi-part target like a 1000 club, create one numeric goal per lift with a shared group.\n"
-    "- Be concise. Numeric goals have no currency — only savings goals are dollars."
+    "- Be concise. Numeric goals have no currency; financial goals are dollars."
 )
 
 TOOLS = [
@@ -50,23 +62,31 @@ TOOLS = [
     {
         "name": "create_goal",
         "description": (
-            "Create a goal. kind is save|spend_cap|numeric|streak — use numeric for any non-money "
-            "target such as a lift. Provide target for save/spend_cap/numeric; category for "
-            "spend_cap; period (daily/weekly/monthly/interval) for cadence; weekly_days as a list of "
+            "Create a goal. kind is financial|numeric|streak — use financial for money outcomes "
+            "and numeric for any non-money "
+            "target such as a lift. Spending limits belong in Budgets, not this tool. Provide target for "
+            "financial/numeric; period (daily/weekly/monthly/interval) for cadence; weekly_days as a list of "
             "monday-sunday values to schedule a weekly goal on multiple days; group to bundle related goals; "
-            "current for a manual starting value; direction reach|under for numeric; since "
+            "reminder_time (HH:MM) for an optional local due time; set repeat_until_completed=true "
+            "when the routine should keep nudging until done or snoozed, with a nudge interval "
+            "(defaults to 60 minutes); "
+            "current for a manual starting value (required and greater than target when direction=under); "
+            "direction reach|under for numeric; since "
             "(YYYY-MM-DD) for a streak start; step for the +/- increment; deadline (YYYY-MM-DD)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "name": {"type": "string"},
-                "kind": {"type": "string", "description": "save | spend_cap | numeric | streak"},
+                "kind": {"type": "string", "description": "financial | numeric | streak"},
                 "target": {"type": "number"},
                 "current": {"type": "number"},
                 "group": {"type": "string"},
                 "period": {"type": "string"},
                 "weekly_days": {"type": "array", "items": {"type": "string"}},
+                "reminder_time": {"type": "string", "description": "Optional local due time in HH:MM format"},
+                "repeat_until_completed": {"type": "boolean"},
+                "nudge_interval_minutes": {"type": "integer", "minimum": 30, "maximum": 1440},
                 "reset_time": {"type": "string"},
                 "weekly_reset_day": {"type": "string"},
                 "monthly_reset_day": {"type": "integer"},
@@ -74,6 +94,10 @@ TOOLS = [
                 "direction": {"type": "string"},
                 "category": {"type": "string"},
                 "account_id": {"type": "integer"},
+                "account_ids": {"type": "array", "items": {"type": "integer"}},
+                "financial_metric": {"type": "string"},
+                "financial_rule": {"type": "string"},
+                "financial_source": {"type": "string", "description": "accounts | manual"},
                 "since": {"type": "string"},
                 "step": {"type": "number"},
                 "deadline": {"type": "string"},
@@ -86,7 +110,9 @@ TOOLS = [
         "description": (
             "Edit an existing goal: name, target, group, deadline, category, and crucially its "
             "cadence — period (once/daily/weekly/monthly), direction (reach/under), or step. Use "
-            "this to fix a goal's period (e.g. make a habit repeat weekly)."
+            "this to fix a goal's period (e.g. make a habit repeat weekly); reminder_time is an "
+            "optional local due time in HH:MM format and is separate from reset_time. Persistent "
+            "routine nudges use repeat_until_completed and nudge_interval_minutes."
         ),
         "input_schema": {
             "type": "object",
@@ -95,9 +121,15 @@ TOOLS = [
                 "group": {"type": "string"}, "deadline": {"type": "string"}, "category": {"type": "string"},
                 "period": {"type": "string"},
                 "weekly_days": {"type": "array", "items": {"type": "string"}},
+                "reminder_time": {"type": "string", "description": "Optional local due time in HH:MM format"},
+                "repeat_until_completed": {"type": "boolean"},
+                "nudge_interval_minutes": {"type": "integer", "minimum": 30, "maximum": 1440},
                 "reset_time": {"type": "string"}, "weekly_reset_day": {"type": "string"},
                 "monthly_reset_day": {"type": "integer"}, "interval_days": {"type": "integer"},
                 "direction": {"type": "string"}, "step": {"type": "number"},
+                "account_ids": {"type": "array", "items": {"type": "integer"}},
+                "financial_metric": {"type": "string"}, "financial_rule": {"type": "string"},
+                "financial_source": {"type": "string", "description": "accounts | manual"},
             },
             "required": ["id"],
         },
@@ -105,7 +137,7 @@ TOOLS = [
     {
         "name": "raise_goal",
         "description": (
-            "Raise a reached save/numeric goal to a new higher target — logs the cleared target as "
+            "Raise a reached legacy save, manual financial, or numeric goal to a new target — logs the cleared target as "
             "a milestone, then sets the new one."
         ),
         "input_schema": {
@@ -146,7 +178,7 @@ def _iso(value):
 
 
 def _goal_view(g: dict) -> dict:
-    return {k: g[k] for k in ("id", "name", "kind", "current_value", "target", "pct", "status", "unit", "group", "period", "weekly_days", "reset_time", "weekly_reset_day", "monthly_reset_day", "interval_days")}
+    return {k: g[k] for k in ("id", "name", "kind", "financial_metric", "financial_rule", "financial_source", "account_ids", "current_value", "anchor_value", "target", "pct", "status", "unit", "group", "period", "weekly_days", "reminder_time", "repeat_until_completed", "nudge_interval_minutes", "reset_time", "weekly_reset_day", "monthly_reset_day", "interval_days")}
 
 
 def _list_goals(session: Session) -> tuple[dict, None]:
@@ -155,6 +187,9 @@ def _list_goals(session: Session) -> tuple[dict, None]:
 
 def _create_goal(session: Session, data: dict) -> tuple[dict, str | None]:
     payload = dict(data or {})
+    # Appearance is an explicit user customization. Agent-created goals always
+    # begin without an icon, even if a model emits an undeclared tool argument.
+    payload.pop("icon", None)
     payload["since"] = _iso(payload.get("since"))
     payload["deadline"] = _iso(payload.get("deadline"))
     try:
@@ -166,9 +201,10 @@ def _create_goal(session: Session, data: dict) -> tuple[dict, str | None]:
 
 def _update_goal(session: Session, data: dict) -> tuple[dict, str | None]:
     gid = data.get("id")
-    fields = {k: data[k] for k in ("name", "target", "group", "deadline", "category",
-                                   "period", "weekly_days", "reset_time", "weekly_reset_day",
-                                   "monthly_reset_day", "interval_days", "direction", "step") if k in data}
+    fields = {k: data[k] for k in ("name", "target", "group", "deadline", "category", "account_ids", "financial_metric", "financial_rule", "financial_source",
+                                   "period", "weekly_days", "reminder_time", "reset_time", "weekly_reset_day",
+                                   "monthly_reset_day", "interval_days", "repeat_until_completed",
+                                   "nudge_interval_minutes", "direction", "step") if k in data}
     if "deadline" in fields:
         fields["deadline"] = _iso(fields["deadline"])
     goal = goals_svc.update_goal(session, int(gid), fields) if gid is not None else None
@@ -204,7 +240,7 @@ def _reset_streak(session: Session, data: dict) -> tuple[dict, str | None]:
 def _delete_goal(session: Session, data: dict) -> tuple[dict, str | None]:
     gid = data.get("id")
     ok = goals_svc.delete_goal(session, int(gid)) if gid is not None else False
-    return ({"deleted": True}, "Deleted a goal") if ok else ({"error": "goal not found"}, None)
+    return ({"archived": True}, "Archived a goal") if ok else ({"error": "goal not found"}, None)
 
 
 _HANDLERS = {
